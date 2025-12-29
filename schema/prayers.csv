@@ -1,0 +1,3 @@
+prayer_id,user_id,geo_area_id,title,description,scripture_reference,expires_at,status,burden_level,intercession_count
+1,101,1,Strength in Trials,"Pray for Sarah as she faces a difficult season.",Mark 8:34,2025-12-29T09:00:00Z,active,heavy,5
+2,102,2,Peace for Family,"Pray for the Lee family in transition.",Luke 9:23,2025-12-29T08:00:00Z,active,moderate,2
