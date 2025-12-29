@@ -1,2 +1,8 @@
 
 PROJECT_PLAN.pdf
+
+firmware/.DS_Store
+
+.DS_Store
+
+firmware/cross/build/*

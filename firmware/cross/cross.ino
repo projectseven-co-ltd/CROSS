@@ -14,14 +14,39 @@
 #include <ESPmDNS.h>
 #include <EEPROM.h>
 #include <Preferences.h>
+#include <HTTPClient.h>
+#include <Update.h>
 
-// Configuration
-const uint16_t CROSS_ID = 1;  // Change this for each device
-const char* AP_SSID = "cross.1";
-const char* AP_PASSWORD = "";  // Open AP (no password)
-const char* HOSTNAME = "cross-1";
+// ============================================================================
+// DEVICE CONFIGURATION DEFAULTS
+// These are only used on FIRST BOOT if not already stored in EEPROM
+// ============================================================================
+const uint16_t DEFAULT_CROSS_ID = 1;      // Cross ID (must match database)
+const uint16_t DEFAULT_GEO_ID = 1;        // Geographic Area ID (must match geo_areas table)
 
-// Network setup
+// Device configuration (loaded from Preferences/EEPROM at boot)
+uint16_t CROSS_ID;
+uint16_t GEO_ID;
+
+// Derived configuration (auto-generated from CROSS_ID)
+String AP_SSID;
+String HOSTNAME;
+
+// ============================================================================
+// FIRMWARE & API CONFIGURATION
+// ============================================================================
+const char* FIRMWARE_VERSION = "1.0.0";  // Current firmware version
+const char* GITHUB_REPO_OWNER = "projectseven-co-ltd";
+const char* GITHUB_REPO_NAME = "CROSS-firmware";
+const char* GITHUB_RELEASE_API = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
+const char* FIRMWARE_BIN_NAME = "cross.bin";
+
+// n8n API endpoint
+const char* API_ENDPOINT = "https://n8n.app.p7n.net/webhook/c570d860-81e0-4e95-b04d-13014f3b373c/crosses";
+
+// ============================================================================
+// NETWORK SETUP
+// ============================================================================
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_GATEWAY(192, 168, 4, 1);
 const IPAddress AP_SUBNET(255, 255, 255, 0);
@@ -42,14 +67,18 @@ unsigned long lastHeartbeatTime = 0;
 int lastSignalStrength = 0;
 String lastErrorMessage = "";
 
-// n8n API endpoint (change to your actual endpoint)
-const char* API_ENDPOINT = "https://n8n.app.p7n.net/webhook/c570d860-81e0-4e95-b04d-13014f3b373c/crosses";
-const char* API_CROSS_ID = "2";  // Change to your cross ID
+// OTA update checking
+unsigned long lastOTACheck = 0;
+const unsigned long OTA_CHECK_INTERVAL = 3600000;  // 1 hour in milliseconds
+bool isUpdating = false;
 
 // Forward declarations
+void loadDeviceConfig();
 bool connectToStoredWiFi();
 void startAPMode();
 void startmDNS();
+void checkForFirmwareUpdate();
+void performOTAUpdate(String firmwareURL);
 void handleRoot();
 void handleStatus();
 void handleSetup();
@@ -65,10 +94,16 @@ void setup() {
   delay(100);
   
   Serial.println("\n\nCROSS Prayer Network - ESP32");
-  Serial.println("Cross ID: " + String(CROSS_ID));
+  Serial.println("Firmware Version: " + String(FIRMWARE_VERSION));
   
   // Initialize preferences (EEPROM wrapper)
   preferences.begin("cross", false);
+  
+  // Load device configuration from Preferences (persists across firmware updates)
+  loadDeviceConfig();
+  
+  Serial.println("Cross ID: " + String(CROSS_ID));
+  Serial.println("Geo Area ID: " + String(GEO_ID));
   
   // Attempt to connect to stored WiFi
   if (!connectToStoredWiFi()) {
@@ -87,18 +122,58 @@ void loop() {
     dnsServer.processNextRequest();
     webServer.handleClient();
   } else if (isConnected) {
-    // Connected mode - handle web requests and poll API
-    webServer.handleClient();
-    
-    // Poll API every 60 seconds
-    unsigned long currentTime = millis();
-    if (currentTime - lastPollTime >= POLL_INTERVAL) {
-      lastPollTime = currentTime;
-      pollAPI();
+    // Connected mode - handle web requests, check for updates, and poll API
+    if (!isUpdating) {
+      webServer.handleClient();
+      
+      unsigned long currentTime = millis();
+      
+      // Poll API every 60 seconds
+      if (currentTime - lastPollTime >= POLL_INTERVAL) {
+        lastPollTime = currentTime;
+        pollAPI();
+      }
+      
+      // Check for firmware updates every hour
+      if (currentTime - lastOTACheck >= OTA_CHECK_INTERVAL) {
+        lastOTACheck = currentTime;
+        checkForFirmwareUpdate();
+      }
     }
     
     delay(100);
   }
+}
+
+// ============================================================================
+// Device Configuration Functions
+// ============================================================================
+
+void loadDeviceConfig() {
+  // Load device configuration from Preferences (EEPROM)
+  // If not set, use defaults and save them
+  
+  CROSS_ID = preferences.getUShort("cross_id", 0);
+  if (CROSS_ID == 0) {
+    // First boot - use defaults and save
+    CROSS_ID = DEFAULT_CROSS_ID;
+    preferences.putUShort("cross_id", CROSS_ID);
+    Serial.println("[CONFIG] First boot - saved CROSS_ID: " + String(CROSS_ID));
+  }
+  
+  GEO_ID = preferences.getUShort("geo_id", 0);
+  if (GEO_ID == 0) {
+    // First boot - use defaults and save
+    GEO_ID = DEFAULT_GEO_ID;
+    preferences.putUShort("geo_id", GEO_ID);
+    Serial.println("[CONFIG] First boot - saved GEO_ID: " + String(GEO_ID));
+  }
+  
+  // Generate derived configuration
+  AP_SSID = "cross." + String(CROSS_ID);
+  HOSTNAME = "cross-" + String(CROSS_ID);
+  
+  Serial.println("[CONFIG] Loaded from EEPROM - survives firmware updates");
 }
 
 // ============================================================================
@@ -142,6 +217,11 @@ bool connectToStoredWiFi() {
     webServer.begin();
     
     Serial.println("Web server started on port 80");
+    
+    // Check for firmware updates on boot
+    checkForFirmwareUpdate();
+    lastOTACheck = millis();  // Reset the timer
+    
     return true;
   }
   
@@ -155,7 +235,7 @@ void startAPMode() {
   
   // Stop STA mode
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  WiFi.softAP(AP_SSID.c_str(), "");
   WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
   
   Serial.println("AP Mode started:");
@@ -176,13 +256,177 @@ void startAPMode() {
 }
 
 void startmDNS() {
-  if (!MDNS.begin(HOSTNAME)) {
+  if (!MDNS.begin(HOSTNAME.c_str())) {
     Serial.println("Error starting mDNS");
     return;
   }
   
   Serial.println("mDNS started: " + String(HOSTNAME) + ".local");
   MDNS.addService("http", "tcp", 80);
+}
+
+// ============================================================================
+// GitHub-Based OTA Updates
+// ============================================================================
+
+void checkForFirmwareUpdate() {
+  if (!isConnected) return;
+  
+  Serial.println("[OTA] Checking for firmware updates...");
+  Serial.println("[OTA] Current version: " + String(FIRMWARE_VERSION));
+  
+  // Quick DNS + TCP sanity check before full HTTPS request
+  IPAddress resolvedIP;
+  if (!WiFi.hostByName("api.github.com", resolvedIP)) {
+    Serial.println("[OTA] DNS resolution failed for api.github.com");
+    return;
+  }
+  Serial.println("[OTA] api.github.com -> " + resolvedIP.toString());
+  
+  WiFiClientSecure testClient;
+  testClient.setInsecure();
+  testClient.setTimeout(15000);
+  if (!testClient.connect("api.github.com", 443)) {
+    char errBuf[80];
+    int err = testClient.lastError(errBuf, sizeof(errBuf));
+    Serial.println("[OTA] TCP/TLS connect failed to api.github.com:443");
+    Serial.printf("[OTA] TLS lastError=%d (%s)\n", err, errBuf);
+    return;
+  }
+  testClient.stop();
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();  // For GitHub API; consider adding certificate validation in production
+  client.setTimeout(15000);
+  
+  // Build GitHub API URL
+  char apiURL[256];
+  snprintf(apiURL, sizeof(apiURL), GITHUB_RELEASE_API, GITHUB_REPO_OWNER, GITHUB_REPO_NAME);
+  
+  http.begin(client, apiURL);
+  http.setTimeout(15000);
+  http.useHTTP10();  // Avoid chunked encoding issues
+  http.addHeader("User-Agent", "CROSS-ESP32");
+  
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    
+    // Simple JSON parsing to extract tag_name (version) and download URL
+    int tagIndex = payload.indexOf("\"tag_name\":\"");
+    if (tagIndex > 0) {
+      tagIndex += 12;
+      int tagEnd = payload.indexOf("\"", tagIndex);
+      String latestVersion = payload.substring(tagIndex, tagEnd);
+      
+      // Remove 'v' prefix if present (e.g., v1.0.1 -> 1.0.1)
+      if (latestVersion.startsWith("v")) {
+        latestVersion = latestVersion.substring(1);
+      }
+      
+      Serial.println("[OTA] Latest version: " + latestVersion);
+      
+      // Compare versions (simple string comparison works for semantic versioning)
+      if (latestVersion != String(FIRMWARE_VERSION)) {
+        Serial.println("[OTA] New version available! Preparing to update...");
+        
+        // Find the firmware binary download URL
+        String searchPattern = "\"browser_download_url\":\"";
+        int urlIndex = payload.indexOf(searchPattern);
+        
+        while (urlIndex > 0) {
+          urlIndex += searchPattern.length();
+          int urlEnd = payload.indexOf("\"", urlIndex);
+          String downloadURL = payload.substring(urlIndex, urlEnd);
+          
+          // Check if this is the firmware binary we want
+          if (downloadURL.endsWith(FIRMWARE_BIN_NAME)) {
+            Serial.println("[OTA] Download URL: " + downloadURL);
+            http.end();
+            performOTAUpdate(downloadURL);
+            return;
+          }
+          
+          // Look for next URL
+          urlIndex = payload.indexOf(searchPattern, urlEnd);
+        }
+        
+        Serial.println("[OTA] Firmware binary not found in release assets");
+      } else {
+        Serial.println("[OTA] Firmware is up to date");
+      }
+    } else {
+      Serial.println("[OTA] Could not parse release information");
+    }
+  } else {
+    Serial.println("[OTA] GitHub API request failed. HTTP code: " + String(httpCode));
+  }
+  
+  http.end();
+}
+
+void performOTAUpdate(String firmwareURL) {
+  Serial.println("[OTA] Starting firmware download...");
+  isUpdating = true;
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15000);
+  
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // handle 302 redirects
+  http.useHTTP10();                                        // avoid chunked transfer issues
+  http.setTimeout(15000);
+  http.addHeader("User-Agent", "CROSS-ESP32");
+  
+  http.begin(client, firmwareURL);
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    int contentLength = http.getSize();
+    Serial.println("[OTA] Firmware size: " + String(contentLength) + " bytes");
+    
+    if (contentLength > 0) {
+      bool canBegin = Update.begin(contentLength);
+      
+      if (canBegin) {
+        Serial.println("[OTA] Begin update. This will take a minute...");
+        
+        WiFiClient * stream = http.getStreamPtr();
+        size_t written = Update.writeStream(*stream);
+        
+        if (written == contentLength) {
+          Serial.println("[OTA] Written : " + String(written) + " successfully");
+        } else {
+          Serial.println("[OTA] Written only : " + String(written) + "/" + String(contentLength));
+        }
+        
+        if (Update.end()) {
+          Serial.println("[OTA] Update complete!");
+          if (Update.isFinished()) {
+            Serial.println("[OTA] Update successfully completed. Rebooting...");
+            delay(1000);
+            ESP.restart();
+          } else {
+            Serial.println("[OTA] Update not finished. Something went wrong!");
+          }
+        } else {
+          Serial.println("[OTA] Error Occurred. Error #: " + String(Update.getError()));
+        }
+      } else {
+        Serial.println("[OTA] Not enough space to begin OTA");
+      }
+    } else {
+      Serial.println("[OTA] Invalid content length");
+    }
+  } else {
+    Serial.println("[OTA] Firmware download failed. HTTP code: " + String(httpCode));
+  }
+  
+  http.end();
+  isUpdating = false;
 }
 
 // ============================================================================
@@ -420,7 +664,7 @@ void pollAPI() {
   WiFiClientSecure client;
   client.setInsecure();  // For development; use proper certificates in production
   
-  String url = String(API_ENDPOINT) + "?crossid=" + String(API_CROSS_ID);
+  String url = String(API_ENDPOINT) + "?crossid=" + String(CROSS_ID);
   
   if (client.connect("n8n.app.p7n.net", 443)) {
     // Extract path from URL
