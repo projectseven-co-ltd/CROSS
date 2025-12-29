@@ -35,7 +35,7 @@ String HOSTNAME;
 // ============================================================================
 // FIRMWARE & API CONFIGURATION
 // ============================================================================
-const char* FIRMWARE_VERSION = "1.0.0";  // Current firmware version
+const char* FIRMWARE_VERSION = "1.0.2";  // Current firmware version
 const char* GITHUB_REPO_OWNER = "projectseven-co-ltd";
 const char* GITHUB_REPO_NAME = "CROSS-firmware";
 const char* GITHUB_RELEASE_API = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
