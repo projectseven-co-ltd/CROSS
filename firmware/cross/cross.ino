@@ -18,8 +18,7 @@
 const uint16_t DEFAULT_CROSS_ID = 1;
 const uint16_t DEFAULT_GEO_ID = 1;
 const char* FIRMWARE_VERSION = "3.3.0";
-const char* GITHUB_FIRMWARE_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/CROSS/main/firmware/cross.bin";
-const char* GITHUB_VERSION_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/CROSS/main/firmware/version.txt";
+const char* GITHUB_API_URL = "https://api.github.com/repos/YOUR_USERNAME/CROSS/releases/latest";
 
 const char* BIBLICAL_NAMES[] = {
   "luke", "john", "mark", "matthew", "paul", "peter", "james", "timothy",
