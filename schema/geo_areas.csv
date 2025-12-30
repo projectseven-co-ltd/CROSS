@@ -1,3 +1,0 @@
-geo_id,name,center_lat,center_lon,radius_km,prayer_threshold_low,prayer_threshold_high
-1,Downtown,40.7128,-74.0060,2,5,10
-2,Eastside,40.7130,-74.0050,1,2,6
