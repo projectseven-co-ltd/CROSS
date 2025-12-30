@@ -244,9 +244,9 @@ void handlePortal() {
   page += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
   page += "<title>CROSS Setup</title>";
   page += "<style>body{font-family:sans-serif;background:#111;color:#eee;margin:0;padding:16px;}";
-  page += ".card{background:#181818;border:1px solid #333;border-radius:8px;padding:16px;max-width:420px;margin:auto;}";
-  page += "label{display:block;margin:12px 0 6px;}input,select{width:100%;padding:10px;border:1px solid #444;border-radius:6px;background:#000;color:#fff;}";
-  page += "button{width:100%;padding:12px;margin-top:14px;background:#fff;color:#000;border:none;border-radius:6px;font-weight:bold;}";
+  page += ".card{background:#181818;border:1px solid #333;border-radius:8px;padding:16px;max-width:420px;width:100%;margin:auto;box-sizing:border-box;}";
+  page += "label{display:block;margin:12px 0 6px;}input,select{width:100%;max-width:100%;padding:10px;border:1px solid #444;border-radius:6px;background:#000;color:#fff;box-sizing:border-box;}";
+  page += "button{width:100%;max-width:100%;padding:12px;margin-top:14px;background:#fff;color:#000;border:none;border-radius:6px;font-weight:bold;box-sizing:border-box;}";
   page += "h1,h2,p{margin:0 0 12px 0;}</style></head><body><div class='card'>";
   page += "<h1>CROSS</h1><p>Configure WiFi</p>";
   
