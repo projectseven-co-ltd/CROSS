@@ -1,6 +1,7 @@
 /*
- * CROSS Prayer Network - ESP32 AP Mode + mDNS Discovery
- * WiFi setup via Access Point with REST API, mDNS for network discovery
+ * CROSS WiFi Onboarding
+ * Minimal firmware focused on WiFi provisioning via AP + captive portal/API.
+ * MQTT/EMQX integration will be layered on after WiFi credentials are available.
  */
 
 #include <WiFi.h>
@@ -12,11 +13,6 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-const uint16_t DEFAULT_CROSS_ID = 1;
-const uint16_t DEFAULT_GEO_ID = 1;
 const char* FIRMWARE_VERSION = "3.3.0";
 const char* GITHUB_API_URL = "https://api.github.com/repos/YOUR_USERNAME/CROSS/releases/latest";
 
@@ -27,8 +23,6 @@ const char* BIBLICAL_NAMES[] = {
 };
 const int BIBLICAL_NAMES_COUNT = 24;
 
-uint16_t CROSS_ID;
-uint16_t GEO_ID;
 String DEVICE_NAME;
 String HOSTNAME;      // Display name (e.g., luke3a7.cross)
 String MDNS_HOSTNAME; // Actual mDNS name (e.g., luke3a7.local)
@@ -43,14 +37,23 @@ const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_GATEWAY(192, 168, 4, 1);
 const IPAddress AP_SUBNET(255, 255, 255, 0);
 
-bool isConnected = false;
 bool apModeActive = false;
+bool serverStarted = false;
+bool isConnected = false;
 
-// Forward declarations for captive portal handlers
+// Forward declarations
+bool connectToSavedWiFi();
+void startAPMode();
+void loadDeviceConfig();
 void handlePortal();
 void handlePortalSave();
+void handleStatusAPI();
+void handleScanWiFiAPI();
+void handleConfigureWiFiAPI();
 void handleOTAUpdate();
 void checkForUpdate();
+void startHttpServer(bool inAPMode);
+void startmDNS();
 
 // ============================================================================
 // SETUP & LOOP
@@ -59,24 +62,26 @@ void checkForUpdate();
 void setup() {
   Serial.begin(115200);
   delay(100);
-  
-  Serial.println("CROSS v" + String(FIRMWARE_VERSION));
+
+  Serial.println("CROSS WiFi Onboarding v" + String(FIRMWARE_VERSION));
   preferences.begin("cross", false);
   loadDeviceConfig();
-  
-  // Try to connect to saved WiFi
+
   if (!connectToSavedWiFi()) {
     startAPMode();
   } else {
     startmDNS();
+    startHttpServer(false);
   }
-  
+
   Serial.println("READY");
 }
 
 void loop() {
   if (apModeActive) {
     dnsServer.processNextRequest();
+  }
+  if (serverStarted) {
     server.handleClient();
   }
   delay(1);
@@ -87,18 +92,6 @@ void loop() {
 // ============================================================================
 
 void loadDeviceConfig() {
-  CROSS_ID = preferences.getUShort("cross_id", DEFAULT_CROSS_ID);
-  if (CROSS_ID == 0) {
-    CROSS_ID = DEFAULT_CROSS_ID;
-    preferences.putUShort("cross_id", CROSS_ID);
-  }
-  
-  GEO_ID = preferences.getUShort("geo_id", DEFAULT_GEO_ID);
-  if (GEO_ID == 0) {
-    GEO_ID = DEFAULT_GEO_ID;
-    preferences.putUShort("geo_id", GEO_ID);
-  }
-  
   DEVICE_NAME = preferences.getString("device_name", "");
   if (DEVICE_NAME == "") {
     randomSeed(ESP.getEfuseMac());
@@ -111,12 +104,12 @@ void loadDeviceConfig() {
     DEVICE_NAME = name + chars;
     preferences.putString("device_name", DEVICE_NAME);
   }
-  
-  AP_SSID = DEVICE_NAME; // Use same name for SSID and mDNS to avoid captive portal confusion
-  HOSTNAME = DEVICE_NAME + ".cross";      // Display name for UI
-  MDNS_HOSTNAME = DEVICE_NAME + ".local"; // mDNS requires .local TLD
-  
-  Serial.println("CFG id=" + String(CROSS_ID) + " name=" + DEVICE_NAME + " mdns=" + MDNS_HOSTNAME + " ap_ssid=" + AP_SSID);
+
+  AP_SSID = DEVICE_NAME;
+  HOSTNAME = DEVICE_NAME + ".cross";
+  MDNS_HOSTNAME = DEVICE_NAME + ".local";
+
+  Serial.println("CFG name=" + DEVICE_NAME + " mdns=" + MDNS_HOSTNAME + " ap_ssid=" + AP_SSID);
 }
 
 // ============================================================================
@@ -129,26 +122,27 @@ bool connectToSavedWiFi() {
     Serial.println("[WiFi] No saved credentials");
     return false;
   }
-  
+
   String pwd = preferences.getString("wifi_password", "");
   Serial.println("[WiFi] Connecting to: " + ssid);
-  
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pwd.c_str());
-  
+
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
-    isConnected = true;
     Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
+    apModeActive = false;
+    isConnected = true;
     return true;
   }
-  
+
   Serial.println("\n[WiFi] Failed, starting AP mode");
   return false;
 }
@@ -158,27 +152,15 @@ void startAPMode() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
   WiFi.softAP(AP_SSID.c_str());
-  dnsServer.start(DNS_PORT, "*", AP_IP); // Redirect all DNS to the portal
-  
+  dnsServer.start(DNS_PORT, "*", AP_IP);
+
   apModeActive = true;
-  
-  // Start mDNS - NOTE: mDNS only works with .local TLD (RFC 6762)
+
   MDNS.begin(DEVICE_NAME.c_str());
   MDNS.addService("http", "tcp", 80);
 
-  // Captive portal endpoints
-  server.on("/", HTTP_GET, handlePortal);
-  server.on("/save", HTTP_POST, handlePortalSave);
-  server.onNotFound(handlePortal);
+  startHttpServer(true);
 
-  // Legacy API (kept for app compatibility)
-  server.on("/api/status", HTTP_GET, handleStatusAPI);
-  server.on("/api/scan-wifi", HTTP_GET, handleScanWiFiAPI);
-  server.on("/api/configure-wifi", HTTP_POST, handleConfigureWiFiAPI);
-  server.on("/api/update", HTTP_POST, handleOTAUpdate);
-  
-  server.begin();
-  
   Serial.println("AP ip=192.168.4.1 ssid=" + AP_SSID);
   Serial.println("Portal http://192.168.4.1/ or http://" + MDNS_HOSTNAME + "/");
 }
@@ -189,29 +171,30 @@ void startAPMode() {
 
 void handleStatusAPI() {
   DynamicJsonDocument doc(256);
-  doc["id"] = CROSS_ID;
   doc["name"] = DEVICE_NAME;
   doc["version"] = FIRMWARE_VERSION;
-  doc["mode"] = "ap";
-  
+  doc["mode"] = apModeActive ? "ap" : "station";
+  doc["ip"] = apModeActive ? "192.168.4.1" : WiFi.localIP().toString();
+  doc["wifi_saved"] = preferences.getString("wifi_ssid", "") != "";
+
   String response;
   serializeJson(doc, response);
-  
+
   server.sendHeader("Content-Type", "application/json");
   server.send(200, "application/json", response);
 }
 
 void handleScanWiFiAPI() {
   Serial.println("scan wifi");
-  
+
   int networks = WiFi.scanNetworks();
   DynamicJsonDocument doc(2048);
   JsonArray arr = doc.to<JsonArray>();
-  
+
   for (int i = 0; i < networks; i++) {
     JsonObject net = arr.createNestedObject();
     net["ssid"] = WiFi.SSID(i);
-    
+
     int sec = WiFi.encryptionType(i);
     String encryption = "open";
     if (sec == WIFI_AUTH_WEP) encryption = "WEP";
@@ -220,14 +203,14 @@ void handleScanWiFiAPI() {
     else if (sec == WIFI_AUTH_WPA_WPA2_PSK) encryption = "WPA/WPA2";
     else if (sec == WIFI_AUTH_WPA2_ENTERPRISE) encryption = "WPA2-Enterprise";
     else if (sec == WIFI_AUTH_WPA3_PSK) encryption = "WPA3";
-    
+
     net["encryption"] = encryption;
     net["rssi"] = WiFi.RSSI(i);
   }
-  
+
   String response;
   serializeJson(arr, response);
-  
+
   server.sendHeader("Content-Type", "application/json");
   server.send(200, "application/json", response);
 }
@@ -248,8 +231,7 @@ void handlePortal() {
   page += "button{width:100%;max-width:100%;padding:12px;margin-top:14px;background:#fff;color:#000;border:none;border-radius:6px;font-weight:bold;box-sizing:border-box;}";
   page += "h1,h2,p{margin:0 0 12px 0;}</style></head><body><div class='card'>";
   page += "<h1>CROSS</h1><p>Configure WiFi</p>";
-  
-  // WiFi scan
+
   int networks = WiFi.scanNetworks();
   page += "<form method='POST' action='/save'>";
   page += "<label>WiFi Network</label><select name='ssid' required>";
@@ -267,7 +249,7 @@ void handlePortal() {
   page += "<button type='submit'>Save & Restart</button>";
   page += "</form><p style='margin-top:12px;font-size:12px;color:#aaa;'>Device: " + DEVICE_NAME + "</p>";
   page += "</div></body></html>";
-  
+
   server.sendHeader("Content-Type", "text/html");
   server.send(200, "text/html", page);
 }
@@ -275,15 +257,15 @@ void handlePortal() {
 void handlePortalSave() {
   String ssid = server.arg("ssid");
   String password = server.arg("password");
-  
+
   if (ssid.length() == 0) {
     server.send(400, "text/plain", "SSID required");
     return;
   }
-  
+
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
-  
+
   String msg = "<html><body><h2>Saved.</h2><p>Rebooting...</p></body></html>";
   server.sendHeader("Content-Type", "text/html");
   server.send(200, "text/html", msg);
@@ -296,38 +278,37 @@ void handleConfigureWiFiAPI() {
     server.send(400, "application/json", "{\"error\": \"No body\"}");
     return;
   }
-  
+
   DynamicJsonDocument doc(256);
   DeserializationError err = deserializeJson(doc, server.arg("plain"));
-  
+
   if (err) {
     server.send(400, "application/json", "{\"error\": \"Invalid JSON\"}");
     return;
   }
-  
+
   String ssid = doc["ssid"] | "";
   String password = doc["password"] | "";
-  
+
   if (ssid == "") {
     server.send(400, "application/json", "{\"error\": \"SSID required\"}");
     return;
   }
-  
+
   Serial.println("store wifi ssid=" + ssid);
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
-  
+
   DynamicJsonDocument response(128);
   response["status"] = "configured";
   response["message"] = "Device will restart";
-  
+
   String responseStr;
   serializeJson(response, responseStr);
-  
+
   server.sendHeader("Content-Type", "application/json");
   server.send(200, "application/json", responseStr);
-  
-  // Restart
+
   delay(1000);
   ESP.restart();
 }
@@ -344,49 +325,71 @@ void startmDNS() {
 }
 
 // ============================================================================
+// HTTP SERVER (shared AP/STA)
+// ============================================================================
+
+void startHttpServer(bool inAPMode) {
+  if (serverStarted) return;
+
+  if (inAPMode) {
+    server.on("/", HTTP_GET, handlePortal);
+    server.on("/save", HTTP_POST, handlePortalSave);
+    server.onNotFound(handlePortal);
+  }
+
+  server.on("/api/status", HTTP_GET, handleStatusAPI);
+  server.on("/api/scan-wifi", HTTP_GET, handleScanWiFiAPI);
+  server.on("/api/configure-wifi", HTTP_POST, handleConfigureWiFiAPI);
+  server.on("/api/update", HTTP_POST, handleOTAUpdate);
+
+  server.begin();
+  serverStarted = true;
+}
+
+// ============================================================================
 // OTA UPDATE
 // ============================================================================
 
 void handleOTAUpdate() {
   Serial.println("OTA update requested");
-  
+
   if (!isConnected) {
     server.send(400, "application/json", "{\"error\": \"Device must be on WiFi for OTA\"}");
     return;
   }
-  
+
   server.send(200, "application/json", "{\"status\": \"updating\", \"message\": \"Downloading firmware...\"}");
   delay(100);
-  
+
   checkForUpdate();
 }
 
 void checkForUpdate() {
   HTTPClient http;
-  
+
   Serial.println("Checking for firmware update...");
   Serial.println("Current version: " + String(FIRMWARE_VERSION));
-  
+
   http.begin(GITHUB_API_URL);
   http.addHeader("Accept", "application/vnd.github+json");
   int httpCode = http.GET();
-  
+
   if (httpCode == 200) {
     DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, http.getStream());
-    
+
     if (!err) {
       String latestVersion = doc["tag_name"].as<String>();
-      latestVersion.replace("v", ""); // Remove 'v' prefix if present
-      
+      latestVersion.replace("v", "");
+
       Serial.println("Latest version: " + latestVersion);
-      
+
       if (latestVersion != String(FIRMWARE_VERSION)) {
         Serial.println("New version available, finding firmware...");
-        
+
         JsonArray assets = doc["assets"];
         String downloadUrl = "";
-        
+
         for (JsonObject asset : assets) {
           String assetName = asset["name"].as<String>();
           if (assetName == "cross.bin") {
@@ -394,14 +397,14 @@ void checkForUpdate() {
             break;
           }
         }
-        
+
         if (downloadUrl.length() > 0) {
           Serial.println("Downloading from: " + downloadUrl);
           http.end();
-          
+
           WiFiClient client;
           t_httpUpdate_return ret = httpUpdate.update(client, downloadUrl);
-          
+
           switch (ret) {
             case HTTP_UPDATE_FAILED:
               Serial.println("Update failed: " + String(httpUpdate.getLastErrorString()));
