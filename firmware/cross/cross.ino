@@ -367,41 +367,67 @@ void checkForUpdate() {
   Serial.println("Checking for firmware update...");
   Serial.println("Current version: " + String(FIRMWARE_VERSION));
   
-  // Check version first
-  http.begin(GITHUB_VERSION_URL);
+  http.begin(GITHUB_API_URL);
+  http.addHeader("Accept", "application/vnd.github+json");
   int httpCode = http.GET();
   
   if (httpCode == 200) {
-    String latestVersion = http.getString();
-    latestVersion.trim();
-    Serial.println("Latest version: " + latestVersion);
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(doc, http.getStream());
     
-    if (latestVersion != String(FIRMWARE_VERSION)) {
-      Serial.println("New version available, updating...");
-      http.end();
+    if (!err) {
+      String latestVersion = doc["tag_name"].as<String>();
+      latestVersion.replace("v", ""); // Remove 'v' prefix if present
       
-      // Perform update
-      WiFiClient client;
-      t_httpUpdate_return ret = httpUpdate.update(client, GITHUB_FIRMWARE_URL);
+      Serial.println("Latest version: " + latestVersion);
       
-      switch (ret) {
-        case HTTP_UPDATE_FAILED:
-          Serial.println("Update failed: " + String(httpUpdate.getLastErrorString()));
-          break;
-        case HTTP_UPDATE_NO_UPDATES:
-          Serial.println("No update needed");
-          break;
-        case HTTP_UPDATE_OK:
-          Serial.println("Update successful, rebooting...");
-          ESP.restart();
-          break;
+      if (latestVersion != String(FIRMWARE_VERSION)) {
+        Serial.println("New version available, finding firmware...");
+        
+        JsonArray assets = doc["assets"];
+        String downloadUrl = "";
+        
+        for (JsonObject asset : assets) {
+          String assetName = asset["name"].as<String>();
+          if (assetName == "cross.bin") {
+            downloadUrl = asset["browser_download_url"].as<String>();
+            break;
+          }
+        }
+        
+        if (downloadUrl.length() > 0) {
+          Serial.println("Downloading from: " + downloadUrl);
+          http.end();
+          
+          WiFiClient client;
+          t_httpUpdate_return ret = httpUpdate.update(client, downloadUrl);
+          
+          switch (ret) {
+            case HTTP_UPDATE_FAILED:
+              Serial.println("Update failed: " + String(httpUpdate.getLastErrorString()));
+              break;
+            case HTTP_UPDATE_NO_UPDATES:
+              Serial.println("No update needed");
+              break;
+            case HTTP_UPDATE_OK:
+              Serial.println("Update successful, rebooting...");
+              ESP.restart();
+              break;
+          }
+        } else {
+          Serial.println("Could not find cross.bin in release assets");
+          http.end();
+        }
+      } else {
+        Serial.println("Already on latest version");
+        http.end();
       }
     } else {
-      Serial.println("Already on latest version");
+      Serial.println("Failed to parse JSON response");
+      http.end();
     }
   } else {
     Serial.println("Failed to check version: " + String(httpCode));
+    http.end();
   }
-  
-  http.end();
 }
