@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross Finder</title>
+  <script type="module" crossorigin src="/assets/index-CTYiZgZN.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-Dj-lqrOb.css">
+</head>
+<body>
+    <div id="app">
+        <header class="header">
+            <div class="logo-container">
+                <img src="/logo.svg" alt="Logo" class="logo">
+                <h1>Cross Finder</h1>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="search-section">
+                <h2>Discover Crosses on Network</h2>
+                
+                <div class="input-group">
+                    <label for="timeout">Discovery Timeout (seconds)</label>
+                    <input type="number" id="timeout" value="5" min="1" max="30">
+                </div>
+
+                <button class="btn-primary" onclick="handleDiscovery()">Scan Network</button>
+                <button class="btn-secondary" onclick="handleRefresh()">Refresh</button>
+            </div>
+
+            <div class="divider">OR</div>
+
+            <div class="search-section">
+                <h2>Direct Connection</h2>
+                
+                <div class="input-group">
+                    <label for="directCrossId">Cross ID</label>
+                    <input type="text" id="directCrossId" placeholder="e.g., 1" value="1">
+                </div>
+
+                <button class="btn-primary" onclick="handleDirectConnect()">Connect to Cross</button>
+                <button class="btn-secondary" onclick="handleTestConnection()">Test Connection</button>
+            </div>
+
+            <div class="results-section" id="resultsSection" style="display: none;">
+                <h2>Discovered Crosses</h2>
+                <div class="results-list" id="resultsList"></div>
+            </div>
+
+            <div class="loading" id="loading" style="display: none;">Scanning network...</div>
+            <div class="error" id="error" style="display: none;"></div>
+
+            <div class="wifi-setup" id="wifiSetup" style="display: none;">
+                <h2>WiFi Setup for <span id="connectedCross"></span></h2>
+                <button class="btn-primary" onclick="handleWiFiScan()">Scan WiFi Networks</button>
+                <div class="results-list" id="wifiNetworks"></div>
+                <div id="wifiConfig" style="display: none;">
+                    <h3>Configure WiFi</h3>
+                    <p>Network: <strong id="selectedNetwork"></strong></p>
+                    <div class="input-group">
+                        <label for="wifiPassword">WiFi Password</label>
+                        <input type="password" id="wifiPassword" placeholder="Enter password">
+                    </div>
+                    <button class="btn-primary" onclick="handleWiFiConfigure()">Connect to WiFi</button>
+                </div>
+                <div id="wifiStatus"></div>
+            </div>
+
+            <div class="cross-status" id="crossStatus" style="display: none;">
+                <h2>Cross Status</h2>
+                <div id="statusData"></div>
+            </div>
+
+</body>
+</html>

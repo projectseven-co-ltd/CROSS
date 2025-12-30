@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CROSS - Prayer Network</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>CROSS</h1>
+      <p>Prayer Network Discovery</p>
+    </header>
+
+    <!-- AP MODE SETUP -->
+    <section class="tab">
+      <h2>Access Point Setup</h2>
+      <p>Connect to your device's cross.X WiFi network, then click Connect:</p>
+      <button id="apConnectBtn" class="btn">Connect to Device</button>
+      <div id="apStatus" style="display: none;"></div>
+      
+      <form id="apConfigForm" style="display: none;">
+        <div id="apSetupForm" style="display: none;">
+          <label>
+            WiFi Network:
+            <select id="apWiFiSSID" required></select>
+          </label>
+          <label>
+            Password (optional):
+            <input type="password" id="apWiFiPassword">
+          </label>
+          <button type="submit" class="btn">Configure WiFi</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- NETWORK DISCOVERY -->
+    <section class="tab">
+      <h2>Network Discovery</h2>
+      <p>Find devices on your WiFi network:</p>
+      <button id="discoverBtn" class="btn">Discover Devices</button>
+      <div id="discoveryStatus" style="display: none;"></div>
+      <div id="discoveredList" class="device-list"></div>
+    </section>
+
+    <!-- SUBMIT PRAYER -->
+    <section class="tab">
+      <h2>Submit Prayer</h2>
+      <form id="prayerForm">
+        <label>
+          Prayer Text:
+          <textarea id="prayerText" required></textarea>
+        </label>
+        <button type="submit" class="btn">Submit Prayer</button>
+      </form>
+      <div id="prayerStatus" style="display: none;"></div>
+    </section>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

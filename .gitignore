@@ -1,8 +1,33 @@
-
-PROJECT_PLAN.pdf
-
-firmware/.DS_Store
-
+# OS Files
 .DS_Store
+Thumbs.db
 
-firmware/cross/build/*
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Firmware
+firmware/cross/build/
+firmware/cross/*.bin
+firmware/cross/*.elf
+firmware/cross/*.hex
+
+# Tauri App
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/Cargo.lock
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary
+*.tmp
+*.bak
+*~
+
+# Project
+PROJECT_PLAN.pdf
