@@ -1,10 +1,11 @@
 /*
  * CROSS WiFi Onboarding
  * Minimal firmware focused on WiFi provisioning via AP + captive portal/API.
- * MQTT/EMQX integration will be layered on after WiFi credentials are available.
+ * Now uses periodic NocoDB polling for prayer events.
  */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -13,8 +14,15 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 
-const char* FIRMWARE_VERSION = "3.3.0";
-const char* GITHUB_API_URL = "https://api.github.com/repos/YOUR_USERNAME/CROSS/releases/latest";
+const char* FIRMWARE_VERSION = "3.0.4";
+const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
+
+// NocoDB polling (set to your API and table/view endpoint)
+const char* NOCODB_BASE_URL = "https://noco.app.p7n.net"; // e.g., https://nocodb.example.com
+const char* NOCODB_PRAYERS_PATH = "/api/v2/tables/mt7iucs253e26u0/records"; // adjust if using a view
+const char* NOCODB_CROSSES_PATH = "/api/v2/tables/mdk4garchpkpvsd/records";
+const char* NOCODB_API_TOKEN = "fDhJb1s9aK8yQsj99iSt6DOe9o518yGAwAdwezn1"; // xc-token header
+const uint32_t NOCODB_POLL_MS = 60000; // poll every 60s
 
 const char* BIBLICAL_NAMES[] = {
   "luke", "john", "mark", "matthew", "paul", "peter", "james", "timothy",
@@ -41,6 +49,16 @@ bool apModeActive = false;
 bool serverStarted = false;
 bool isConnected = false;
 
+String crossId;
+
+// NocoDB poll state
+unsigned long lastNocoPollMs = 0;
+String lastPrayerSeenTs;
+
+// OTA update state
+unsigned long lastOTACheckMs = 0;
+const uint32_t OTA_CHECK_INTERVAL_MS = 86400000; // 24 hours in milliseconds
+
 // Forward declarations
 bool connectToSavedWiFi();
 void startAPMode();
@@ -54,6 +72,12 @@ void handleOTAUpdate();
 void checkForUpdate();
 void startHttpServer(bool inAPMode);
 void startmDNS();
+void runPrayerPulse();
+void pollPrayersIfDue();
+void pollPrayers();
+void registerCrossIfNeeded();
+bool fetchExistingCross();
+bool createCrossRecord();
 
 // ============================================================================
 // SETUP & LOOP
@@ -67,11 +91,19 @@ void setup() {
   preferences.begin("cross", false);
   loadDeviceConfig();
 
+  crossId = preferences.getString("cross_id", "");
+  // restore last seen prayer timestamp
+  lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
+
   if (!connectToSavedWiFi()) {
     startAPMode();
   } else {
     startmDNS();
     startHttpServer(false);
+    syncTimeWithNTP();
+    registerCrossIfNeeded();
+    // Check for OTA update on boot
+    checkForUpdate();
   }
 
   Serial.println("READY");
@@ -84,7 +116,36 @@ void loop() {
   if (serverStarted) {
     server.handleClient();
   }
+  if (!apModeActive && isConnected) {
+    pollPrayersIfDue();
+    checkForOTAUpdateIfDue();
+  }
   delay(1);
+}
+
+// ============================================================================
+// NTP TIME SYNC
+// ============================================================================
+
+void syncTimeWithNTP() {
+  Serial.println("Syncing time with NTP...");
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  
+  time_t now = time(nullptr);
+  int attempts = 0;
+  while (now < 24 * 3600 && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+    attempts++;
+  }
+  Serial.println();
+  
+  if (now > 24 * 3600) {
+    Serial.println("Time synced: " + String(ctime(&now)));
+  } else {
+    Serial.println("NTP sync failed, time may be incorrect");
+  }
 }
 
 // ============================================================================
@@ -127,23 +188,31 @@ bool connectToSavedWiFi() {
   Serial.println("[WiFi] Connecting to: " + ssid);
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), pwd.c_str());
+  
+  // Try up to 3 times with delays between attempts
+  for (int attempt = 0; attempt < 3; attempt++) {
+    WiFi.begin(ssid.c_str(), pwd.c_str());
+    
+    // Wait up to 20 seconds per attempt (40 x 500ms)
+    int connect_attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && connect_attempts < 40) {
+      delay(500);
+      Serial.print(".");
+      connect_attempts++;
+    }
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
+      apModeActive = false;
+      isConnected = true;
+      return true;
+    }
+    
+    Serial.println("\n[WiFi] Attempt " + String(attempt + 1) + " failed, retrying...");
+    delay(2000); // Wait 2 seconds before next attempt
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
-    apModeActive = false;
-    isConnected = true;
-    return true;
-  }
-
-  Serial.println("\n[WiFi] Failed, starting AP mode");
+  Serial.println("[WiFi] Failed after 3 attempts, starting AP mode");
   return false;
 }
 
@@ -163,6 +232,329 @@ void startAPMode() {
 
   Serial.println("AP ip=192.168.4.1 ssid=" + AP_SSID);
   Serial.println("Portal http://192.168.4.1/ or http://" + MDNS_HOSTNAME + "/");
+}
+
+// ============================================================================
+// PRAYER INDICATOR
+// ============================================================================
+
+void runPrayerPulse() {
+  // TODO: hook up to LED strip / GPIO. Placeholder pulse indicator.
+  Serial.println("[LED] Pulse prayer pattern (stub)");
+}
+
+// ============================================================================
+// NOCODB REGISTRATION (Cross record)
+// ============================================================================
+
+void registerCrossIfNeeded() {
+  if (crossId.length() > 0 && crossId != "null") {
+    Serial.println("[NocoDB] Cross already registered id=" + crossId);
+    return;
+  }
+
+  // Clear bad null values
+  if (crossId == "null") {
+    crossId = "";
+    preferences.putString("cross_id", "");
+  }
+
+  if (fetchExistingCross()) {
+    return;
+  }
+
+  createCrossRecord();
+}
+
+bool fetchExistingCross() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH);
+  url += "?where=(device_name,eq," + DEVICE_NAME + ")";
+
+  Serial.println("[NocoDB] Lookup URL: " + url);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure(); // TODO: add root CA for production
+  http.begin(client, url);
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.GET();
+  Serial.println("[NocoDB] Lookup response code: " + String(code));
+  
+  if (code != 200) {
+    Serial.println("[NocoDB] Cross lookup failed code=" + String(code));
+    String response = http.getString();
+    Serial.println("[NocoDB] Response: " + response);
+    http.end();
+    return false;
+  }
+
+  String response = http.getString();
+  Serial.println("[NocoDB] Lookup response: " + response.substring(0, 200));
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, response);
+  http.end();
+  if (err) {
+    Serial.println("[NocoDB] Cross lookup JSON parse error: " + String(err.c_str()));
+    return false;
+  }
+
+  JsonArray records = doc["list"];
+  if (records.isNull()) {
+    records = doc["data"].as<JsonArray>();
+  }
+
+  if (records.isNull() || records.size() == 0) {
+    Serial.println("[NocoDB] Cross not found, will create");
+    return false;
+  }
+
+  JsonObject rec = records[0];
+  String id = rec["Id"].as<String>();
+  if (id.length() == 0) {
+    Serial.println("[NocoDB] Cross lookup missing Id");
+    return false;
+  }
+
+  crossId = id;
+  preferences.putString("cross_id", crossId);
+  Serial.println("[NocoDB] Cross found id=" + crossId);
+  return true;
+}
+
+void updateCrossVersionInNocoDB() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (crossId.length() == 0 || crossId == "null") return;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  StaticJsonDocument<256> doc;
+  doc["Id"] = crossId;
+  doc["firmware_version"] = FIRMWARE_VERSION;
+
+  String payload;
+  serializeJson(doc, payload);
+  Serial.println("[NocoDB] Update version payload: " + payload);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.PATCH(payload);
+  Serial.println("[NocoDB] Update version response code: " + String(code));
+
+  if (code < 200 || code >= 300) {
+    Serial.println("[NocoDB] Version update failed code=" + String(code));
+    String response = http.getString();
+    Serial.println("[NocoDB] Error: " + response);
+  } else {
+    Serial.println("[NocoDB] Version updated successfully");
+  }
+  http.end();
+}
+
+void updateCrossHeartbeat() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (crossId.length() == 0 || crossId == "null") return;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  // Use RFC3339 format timestamp for compatibility
+  time_t now = time(nullptr);
+  struct tm* timeinfo = gmtime(&now);
+  char timestamp[30];
+  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
+
+  StaticJsonDocument<256> doc;
+  doc["Id"] = crossId;
+  doc["last_heartbeat"] = String(timestamp);
+
+  String payload;
+  serializeJson(doc, payload);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.PATCH(payload);
+  if (code >= 200 && code < 300) {
+    Serial.println("[NocoDB] Heartbeat updated");
+  } else {
+    Serial.println("[NocoDB] Heartbeat update failed code=" + String(code));
+  }
+  http.end();
+}
+
+bool createCrossRecord() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH);
+
+  StaticJsonDocument<512> doc;
+  doc["name"] = DEVICE_NAME;
+  doc["device_name"] = DEVICE_NAME;
+  doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["status"] = "active";
+
+  String payload;
+  serializeJson(doc, payload);
+  Serial.println("[NocoDB] Create payload: " + payload);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure(); // TODO: add root CA for production
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.POST(payload);
+  Serial.println("[NocoDB] Create response code: " + String(code));
+  
+  if (code < 200 || code >= 300) {
+    Serial.println("[NocoDB] Cross create failed code=" + String(code));
+    String response = http.getString();
+    Serial.println("[NocoDB] Create error: " + response);
+    http.end();
+    return false;
+  }
+
+  String response = http.getString();
+  Serial.println("[NocoDB] Create response: " + response.substring(0, 200));
+
+  DynamicJsonDocument resp(2048);
+  DeserializationError err = deserializeJson(resp, response);
+  http.end();
+  if (err) {
+    Serial.println("[NocoDB] Cross create JSON parse error: " + String(err.c_str()));
+    return false;
+  }
+
+  String id = resp["Id"].as<String>();
+  if (id.length() == 0 && !resp["data"].isNull()) {
+    id = resp["data"]["Id"].as<String>();
+  }
+  if (id.length() == 0) {
+    JsonArray arr = resp["list"].as<JsonArray>();
+    if (!arr.isNull() && arr.size() > 0) {
+      id = arr[0]["Id"].as<String>();
+    }
+  }
+
+  if (id.length() == 0) {
+    Serial.println("[NocoDB] Cross create missing Id");
+    return false;
+  }
+
+  crossId = id;
+  preferences.putString("cross_id", crossId);
+  Serial.println("[NocoDB] Cross created id=" + crossId);
+  return true;
+}
+
+// ============================================================================
+// NOCODB POLLING (Prayers)
+// ============================================================================
+
+void pollPrayersIfDue() {
+  unsigned long now = millis();
+  if (now - lastNocoPollMs < NOCODB_POLL_MS) return;
+  lastNocoPollMs = now;
+  pollPrayers();
+}
+
+void checkForOTAUpdateIfDue() {
+  unsigned long now = millis();
+  if (now - lastOTACheckMs < OTA_CHECK_INTERVAL_MS) return;
+  lastOTACheckMs = now;
+  checkForUpdate();
+}
+
+void pollPrayers() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  // Update heartbeat
+  updateCrossHeartbeat();
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_PRAYERS_PATH);
+  // Example filter: newer than lastPrayerSeenTs; adjust to your schema/where-clause as needed.
+  if (lastPrayerSeenTs.length() > 0) {
+    url += "?where=created_at%3E'" + lastPrayerSeenTs + "'&limit=20&sort=created_at&order=asc";
+  } else {
+    url += "?limit=5&sort=created_at&order=desc";
+  }
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure(); // TODO: add root CA for production
+  http.begin(client, url);
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.println("[NocoDB] GET failed code=" + String(code));
+    http.end();
+    return;
+  }
+
+  DynamicJsonDocument doc(4096);
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  if (err) {
+    Serial.println("[NocoDB] JSON parse error");
+    http.end();
+    return;
+  }
+  http.end();
+
+  JsonArray records = doc["list"];
+  if (records.isNull()) {
+    // Some NocoDB responses might use "data"; try fallback
+    records = doc["data"].as<JsonArray>();
+  }
+
+  if (records.isNull() || records.size() == 0) {
+    Serial.println("[NocoDB] No new prayers");
+    return;
+  }
+
+  Serial.println("[NocoDB] Prayers fetched count=" + String(records.size()));
+  String newestTs = lastPrayerSeenTs;
+
+  for (JsonObject rec : records) {
+    String created = rec["created_at"] | "";
+    if (created.length() > 0) {
+      if (newestTs.length() == 0 || created > newestTs) {
+        newestTs = created;
+      }
+    }
+  }
+
+  // Trigger LED pulse for any newly observed prayers
+  runPrayerPulse();
+
+  if (newestTs.length() > 0 && newestTs != lastPrayerSeenTs) {
+    lastPrayerSeenTs = newestTs;
+    preferences.putString("last_prayer_ts", lastPrayerSeenTs);
+    Serial.println("[NocoDB] Updated last_prayer_ts=" + lastPrayerSeenTs);
+  }
 }
 
 // ============================================================================
@@ -402,20 +794,43 @@ void checkForUpdate() {
           Serial.println("Downloading from: " + downloadUrl);
           http.end();
 
-          WiFiClient client;
-          t_httpUpdate_return ret = httpUpdate.update(client, downloadUrl);
+          // Use WiFiClientSecure for HTTPS with proper timeout
+          WiFiClientSecure client;
+          client.setInsecure(); // TODO: add root CA for production
+          client.setConnectionTimeout(15000); // 15 second connect timeout
+          client.setTimeout(30000); // 30 second socket timeout
 
-          switch (ret) {
-            case HTTP_UPDATE_FAILED:
-              Serial.println("Update failed: " + String(httpUpdate.getLastErrorString()));
+          // Retry logic for download
+          int maxRetries = 3;
+          for (int attempt = 0; attempt < maxRetries; attempt++) {
+            Serial.println("OTA download attempt " + String(attempt + 1) + "/" + String(maxRetries));
+            
+            t_httpUpdate_return ret = httpUpdate.update(client, downloadUrl);
+
+            switch (ret) {
+              case HTTP_UPDATE_FAILED:
+                Serial.println("Update attempt " + String(attempt + 1) + " failed: " + String(httpUpdate.getLastErrorString()));
+                if (attempt < maxRetries - 1) {
+                  Serial.println("Retrying in 5 seconds...");
+                  delay(5000);
+                }
+                break;
+              case HTTP_UPDATE_NO_UPDATES:
+                Serial.println("No update needed");
+                return;
+              case HTTP_UPDATE_OK:
+                Serial.println("Update successful, rebooting...");
+                // Update version in NocoDB before rebooting
+                updateCrossVersionInNocoDB();
+                delay(1000);
+                ESP.restart();
+                break;
+            }
+            
+            // Break on success or final failure
+            if (ret != HTTP_UPDATE_FAILED || attempt == maxRetries - 1) {
               break;
-            case HTTP_UPDATE_NO_UPDATES:
-              Serial.println("No update needed");
-              break;
-            case HTTP_UPDATE_OK:
-              Serial.println("Update successful, rebooting...");
-              ESP.restart();
-              break;
+            }
           }
         } else {
           Serial.println("Could not find cross.bin in release assets");
