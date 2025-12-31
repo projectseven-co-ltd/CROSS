@@ -13,9 +13,18 @@
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
+#include <FastLED.h>
 
 const char* FIRMWARE_VERSION = "3.1.0";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
+
+// WS2812B LED Strip Configuration
+#define LED_PIN 5          // GPIO pin for data line (adjust as needed)
+#define NUM_LEDS 8         // Number of addressable LEDs (adjust as needed)
+#define LED_TYPE WS2812B
+#define COLOR_ORDER GRB
+
+CRGB leds[NUM_LEDS];
 
 // NocoDB polling (set to your API and table/view endpoint)
 const char* NOCODB_BASE_URL = "https://noco.app.p7n.net"; // e.g., https://nocodb.example.com
@@ -88,6 +97,12 @@ bool createCrossRecord();
 void setup() {
   Serial.begin(115200);
   delay(100);
+
+  // Initialize WS2812B LEDs
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  FastLED.setBrightness(100);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
 
   Serial.println("CROSS WiFi Onboarding v" + String(FIRMWARE_VERSION));
   preferences.begin("cross", false);
@@ -245,8 +260,33 @@ void startAPMode() {
 // ============================================================================
 
 void runPrayerPulse() {
-  // TODO: hook up to LED strip / GPIO. Placeholder pulse indicator.
-  Serial.println("[LED] Pulse prayer pattern (stub)");
+  // Prayer pulse effect: fade in cyan, hold, fade out
+  // Cyan color represents hope and intercession
+  const uint8_t pulseSpeed = 20;  // milliseconds per brightness step
+  const uint8_t maxBrightness = 100;
+  
+  // Fade in
+  for (uint8_t brightness = 0; brightness <= maxBrightness; brightness += 5) {
+    fill_solid(leds, NUM_LEDS, CHSV(128, 200, brightness)); // Cyan (HSV)
+    FastLED.show();
+    delay(pulseSpeed);
+  }
+  
+  // Hold bright
+  delay(500);
+  
+  // Fade out
+  for (uint8_t brightness = maxBrightness; brightness > 0; brightness -= 5) {
+    fill_solid(leds, NUM_LEDS, CHSV(128, 200, brightness));
+    FastLED.show();
+    delay(pulseSpeed);
+  }
+  
+  // Turn off
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+  
+  Serial.println("[LED] Prayer pulse complete");
 }
 
 // ============================================================================
