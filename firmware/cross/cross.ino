@@ -15,7 +15,7 @@
 #include <HTTPUpdate.h>
 #include <FastLED.h>
 
-const char* FIRMWARE_VERSION = "3.1.0";
+const char* FIRMWARE_VERSION = "3.1";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // WS2812B LED Strip Configuration
