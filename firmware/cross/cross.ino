@@ -14,7 +14,7 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 
-const char* FIRMWARE_VERSION = "3.0.4";
+const char* FIRMWARE_VERSION = "3.1.0";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // NocoDB polling (set to your API and table/view endpoint)
@@ -54,6 +54,8 @@ String crossId;
 // NocoDB poll state
 unsigned long lastNocoPollMs = 0;
 String lastPrayerSeenTs;
+long lastPrayerSeenId = 0;
+long intercessionCount = 0;
 
 // OTA update state
 unsigned long lastOTACheckMs = 0;
@@ -94,6 +96,8 @@ void setup() {
   crossId = preferences.getString("cross_id", "");
   // restore last seen prayer timestamp
   lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
+  lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
+  intercessionCount = preferences.getLong("intercession_count", 0);
 
   if (!connectToSavedWiFi()) {
     startAPMode();
@@ -102,6 +106,8 @@ void setup() {
     startHttpServer(false);
     syncTimeWithNTP();
     registerCrossIfNeeded();
+    // Ensure NocoDB reflects current firmware on boot
+    updateCrossVersionInNocoDB();
     // Check for OTA update on boot
     checkForUpdate();
   }
@@ -323,6 +329,10 @@ bool fetchExistingCross() {
 
   crossId = id;
   preferences.putString("cross_id", crossId);
+  if (!rec["intercession_count"].isNull()) {
+    intercessionCount = rec["intercession_count"].as<long>();
+    preferences.putLong("intercession_count", intercessionCount);
+  }
   Serial.println("[NocoDB] Cross found id=" + crossId);
   return true;
 }
@@ -359,6 +369,37 @@ void updateCrossVersionInNocoDB() {
     Serial.println("[NocoDB] Error: " + response);
   } else {
     Serial.println("[NocoDB] Version updated successfully");
+  }
+  http.end();
+}
+
+void updateCrossIntercessionCount() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (crossId.length() == 0 || crossId == "null") return;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  StaticJsonDocument<256> doc;
+  doc["Id"] = crossId;
+  doc["intercession_count"] = intercessionCount;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.PATCH(payload);
+  if (code < 200 || code >= 300) {
+    Serial.println("[NocoDB] Intercession update failed code=" + String(code));
+  } else {
+    Serial.println("[NocoDB] Intercession count updated to " + String(intercessionCount));
   }
   http.end();
 }
@@ -410,6 +451,7 @@ bool createCrossRecord() {
   doc["device_name"] = DEVICE_NAME;
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["status"] = "active";
+  doc["intercession_count"] = intercessionCount;
 
   String payload;
   serializeJson(doc, payload);
@@ -493,11 +535,11 @@ void pollPrayers() {
   updateCrossHeartbeat();
 
   String url = String(NOCODB_BASE_URL) + String(NOCODB_PRAYERS_PATH);
-  // Example filter: newer than lastPrayerSeenTs; adjust to your schema/where-clause as needed.
-  if (lastPrayerSeenTs.length() > 0) {
-    url += "?where=created_at%3E'" + lastPrayerSeenTs + "'&limit=20&sort=created_at&order=asc";
+  // Filter by incremental Id to avoid date-format issues
+  if (lastPrayerSeenId > 0) {
+    url += "?where=(Id,gt," + String(lastPrayerSeenId) + ")&limit=20&sort=Id&order=asc";
   } else {
-    url += "?limit=5&sort=created_at&order=desc";
+    url += "?limit=5&sort=Id&order=desc";
   }
 
   HTTPClient http;
@@ -507,10 +549,11 @@ void pollPrayers() {
   if (String(NOCODB_API_TOKEN).length() > 0) {
     http.addHeader("xc-token", NOCODB_API_TOKEN);
   }
-
   int code = http.GET();
   if (code != 200) {
     Serial.println("[NocoDB] GET failed code=" + String(code));
+    String resp = http.getString();
+    Serial.println("[NocoDB] GET body: " + resp);
     http.end();
     return;
   }
@@ -537,9 +580,23 @@ void pollPrayers() {
 
   Serial.println("[NocoDB] Prayers fetched count=" + String(records.size()));
   String newestTs = lastPrayerSeenTs;
+  long newestId = lastPrayerSeenId;
+  int newPrayerCount = 0;
 
   for (JsonObject rec : records) {
-    String created = rec["created_at"] | "";
+    long recId = rec["Id"] | 0;
+    if (recId > 0 && recId > lastPrayerSeenId) {
+      newPrayerCount++;
+      // Trigger LED pulse for each new prayer
+      runPrayerPulse();
+      if (newPrayerCount < records.size()) {
+        delay(2000); // 2 second delay between prayer pulses
+      }
+    }
+    if (recId > 0 && recId > newestId) {
+      newestId = recId;
+    }
+    String created = rec["CreatedAt"] | "";
     if (created.length() > 0) {
       if (newestTs.length() == 0 || created > newestTs) {
         newestTs = created;
@@ -547,13 +604,22 @@ void pollPrayers() {
     }
   }
 
-  // Trigger LED pulse for any newly observed prayers
-  runPrayerPulse();
+  if (newPrayerCount > 0) {
+    Serial.println("[NocoDB] New prayers: " + String(newPrayerCount));
+    intercessionCount += newPrayerCount;
+    preferences.putLong("intercession_count", intercessionCount);
+    updateCrossIntercessionCount();
+  }
 
   if (newestTs.length() > 0 && newestTs != lastPrayerSeenTs) {
     lastPrayerSeenTs = newestTs;
     preferences.putString("last_prayer_ts", lastPrayerSeenTs);
     Serial.println("[NocoDB] Updated last_prayer_ts=" + lastPrayerSeenTs);
+  }
+  if (newestId > lastPrayerSeenId) {
+    lastPrayerSeenId = newestId;
+    preferences.putLong("last_prayer_id", lastPrayerSeenId);
+    Serial.println("[NocoDB] Updated last_prayer_id=" + String(lastPrayerSeenId));
   }
 }
 
@@ -568,6 +634,7 @@ void handleStatusAPI() {
   doc["mode"] = apModeActive ? "ap" : "station";
   doc["ip"] = apModeActive ? "192.168.4.1" : WiFi.localIP().toString();
   doc["wifi_saved"] = preferences.getString("wifi_ssid", "") != "";
+  doc["intercession_count"] = intercessionCount;
 
   String response;
   serializeJson(doc, response);
@@ -800,6 +867,9 @@ void checkForUpdate() {
           client.setConnectionTimeout(15000); // 15 second connect timeout
           client.setTimeout(30000); // 30 second socket timeout
 
+          // Ensure redirects are followed for GitHub asset URLs
+          httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
           // Retry logic for download
           int maxRetries = 3;
           for (int attempt = 0; attempt < maxRetries; attempt++) {
@@ -820,7 +890,8 @@ void checkForUpdate() {
                 return;
               case HTTP_UPDATE_OK:
                 Serial.println("Update successful, rebooting...");
-                // Update version in NocoDB before rebooting
+                // Ensure cross exists then update version in NocoDB before rebooting
+                registerCrossIfNeeded();
                 updateCrossVersionInNocoDB();
                 delay(1000);
                 ESP.restart();

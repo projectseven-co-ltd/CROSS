@@ -1,1 +1,1 @@
-cross_id,name,geo_area_id,user_id,status,last_heartbeat,firmware_version,device_name,created_at,updated_at
+cross_id,name,geo_area_id,user_id,status,last_heartbeat,firmware_version,device_name,created_at,updated_at,intercession_count
