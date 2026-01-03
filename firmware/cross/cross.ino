@@ -22,7 +22,7 @@
 #include <FastLED.h>
 #endif
 
-const char* FIRMWARE_VERSION = "3.4";
+const char* FIRMWARE_VERSION = "3.5";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // LED Strip Configuration
@@ -81,6 +81,7 @@ bool serverStarted = false;
 bool isConnected = false;
 
 String crossId;
+String apiToken;  // Optional API authentication token
 
 // NocoDB poll state
 unsigned long lastNocoPollMs = 0;
@@ -106,7 +107,10 @@ void handleStatusAPI();
 void handleScanWiFiAPI();
 void handleConfigureWiFiAPI();
 void handleWiFiReset();
+void handleSetName();
+void handleSetToken();
 void handleOTAUpdate();
+bool isAuthorized();
 void checkForUpdate();
 void startHttpServer(bool inAPMode);
 void startmDNS();
@@ -188,6 +192,7 @@ void setup() {
   loadDeviceConfig();
 
   crossId = preferences.getString("cross_id", "");
+  apiToken = preferences.getString("api_token", "");
   // restore last seen prayer timestamp
   lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
   lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
@@ -1120,6 +1125,12 @@ void handleConfigureWiFiAPI() {
 }
 
 void handleWiFiReset() {
+  // Uncomment when ready to enforce auth:
+  // if (!isAuthorized()) {
+  //   server.send(401, "application/json", "{\"error\": \"Unauthorized\"}");
+  //   return;
+  // }
+  
   Serial.println("WiFi reset requested");
   
   preferences.putString("wifi_ssid", "");
@@ -1128,6 +1139,133 @@ void handleWiFiReset() {
   server.send(200, "application/json", "{\"status\": \"reset\", \"message\": \"WiFi credentials cleared, rebooting...\"}");
   delay(1000);
   ESP.restart();
+}
+
+bool isAuthorized() {
+  // If no token is set, allow all requests (backward compatible)
+  if (apiToken.length() == 0) return true;
+  
+  // Check for Authorization header
+  if (!server.hasHeader("Authorization")) return false;
+  
+  String authHeader = server.header("Authorization");
+  String expectedAuth = "Bearer " + apiToken;
+  
+  return authHeader == expectedAuth;
+}
+
+void handleSetToken() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\": \"No body\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(256);
+  DeserializationError err = deserializeJson(doc, server.arg("plain"));
+
+  if (err) {
+    server.send(400, "application/json", "{\"error\": \"Invalid JSON\"}");
+    return;
+  }
+
+  String newToken = doc["token"] | "";
+  
+  // Allow empty string to disable auth
+  if (newToken.length() > 128) {
+    server.send(400, "application/json", "{\"error\": \"token too long (max 128 chars)\"}");
+    return;
+  }
+
+  Serial.println("[API] Setting API token");
+  apiToken = newToken;
+  preferences.putString("api_token", apiToken);
+  
+  DynamicJsonDocument response(128);
+  response["status"] = "success";
+  response["auth_enabled"] = (apiToken.length() > 0);
+  
+  String responseStr;
+  serializeJson(response, responseStr);
+  
+  server.sendHeader("Content-Type", "application/json");
+  server.send(200, "application/json", responseStr);
+}
+
+void handleSetName() {
+  // Uncomment when ready to enforce auth:
+  // if (!isAuthorized()) {
+  //   server.send(401, "application/json", "{\"error\": \"Unauthorized\"}");
+  //   return;
+  // }
+  
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\": \"No body\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(256);
+  DeserializationError err = deserializeJson(doc, server.arg("plain"));
+
+  if (err) {
+    server.send(400, "application/json", "{\"error\": \"Invalid JSON\"}");
+    return;
+  }
+
+  String newName = doc["device_name"] | "";
+  if (newName == "" || newName.length() > 32) {
+    server.send(400, "application/json", "{\"error\": \"device_name required (max 32 chars)\"}");
+    return;
+  }
+
+  Serial.println("[API] Changing device name to: " + newName);
+  
+  // Update preferences and globals
+  DEVICE_NAME = newName;
+  preferences.putString("device_name", DEVICE_NAME);
+  
+  HOSTNAME = DEVICE_NAME + ".cross";
+  MDNS_HOSTNAME = DEVICE_NAME + ".local";
+  AP_SSID = DEVICE_NAME;
+  
+  // Update NocoDB if connected and registered
+  if (WiFi.status() == WL_CONNECTED && crossId.length() > 0 && crossId != "null") {
+    String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+    StaticJsonDocument<256> updateDoc;
+    updateDoc["Id"] = crossId;
+    updateDoc["name"] = DEVICE_NAME;
+    updateDoc["device_name"] = DEVICE_NAME;
+    
+    String payload;
+    serializeJson(updateDoc, payload);
+    
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    if (String(NOCODB_API_TOKEN).length() > 0) {
+      http.addHeader("xc-token", NOCODB_API_TOKEN);
+    }
+    
+    int code = http.PATCH(payload);
+    if (code >= 200 && code < 300) {
+      Serial.println("[NocoDB] Device name updated");
+    } else {
+      Serial.println("[NocoDB] Name update failed code=" + String(code));
+    }
+    http.end();
+  }
+  
+  DynamicJsonDocument response(128);
+  response["status"] = "success";
+  response["device_name"] = DEVICE_NAME;
+  response["hostname"] = HOSTNAME;
+  
+  String responseStr;
+  serializeJson(response, responseStr);
+  
+  server.sendHeader("Content-Type", "application/json");
+  server.send(200, "application/json", responseStr);
 }
 
 // ============================================================================
@@ -1158,6 +1296,8 @@ void startHttpServer(bool inAPMode) {
   server.on("/api/scan-wifi", HTTP_GET, handleScanWiFiAPI);
   server.on("/api/configure-wifi", HTTP_POST, handleConfigureWiFiAPI);
   server.on("/api/reset-wifi", HTTP_POST, handleWiFiReset);
+  server.on("/api/set-name", HTTP_POST, handleSetName);
+  server.on("/api/set-token", HTTP_POST, handleSetToken);
   server.on("/api/update", HTTP_POST, handleOTAUpdate);
 
   server.begin();
@@ -1169,6 +1309,12 @@ void startHttpServer(bool inAPMode) {
 // ============================================================================
 
 void handleOTAUpdate() {
+  // Uncomment when ready to enforce auth:
+  // if (!isAuthorized()) {
+  //   server.send(401, "application/json", "{\"error\": \"Unauthorized\"}");
+  //   return;
+  // }
+  
   Serial.println("OTA update requested");
 
   if (!isConnected) {
