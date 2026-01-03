@@ -31,3 +31,5 @@ npm-debug.log*
 
 # Project
 PROJECT_PLAN.pdf
+
+*.pdf

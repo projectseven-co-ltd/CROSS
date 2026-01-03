@@ -4,6 +4,10 @@
  * Now uses periodic NocoDB polling for prayer events.
  */
 
+// LED Strip Configuration - Choose ONE:
+#define LED_TYPE_COMMON_ANODE    // Non-addressable RGB strip (3 pins: R, G, B)
+// #define LED_TYPE_ADDRESSABLE  // WS2812/SK6812 addressable strip (1 data pin)
+
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
@@ -13,18 +17,35 @@
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
-#include <FastLED.h>
 
-const char* FIRMWARE_VERSION = "3.1";
+#ifdef LED_TYPE_ADDRESSABLE
+#include <FastLED.h>
+#endif
+
+const char* FIRMWARE_VERSION = "3.3";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
-// WS2812B LED Strip Configuration
-#define LED_PIN 5          // GPIO pin for data line (adjust as needed)
-#define NUM_LEDS 8         // Number of addressable LEDs (adjust as needed)
-#define LED_TYPE WS2812B
-#define COLOR_ORDER GRB
+// LED Strip Configuration
+#ifdef LED_TYPE_COMMON_ANODE
+  // Non-addressable RGB strip (common anode)
+  #define LED_PIN_R 16       // GPIO pin for Red channel
+  #define LED_PIN_G 17       // GPIO pin for Green channel
+  #define LED_PIN_B 18       // GPIO pin for Blue channel
+  #define PWM_CHANNEL_R 0    // PWM channel for Red
+  #define PWM_CHANNEL_G 1    // PWM channel for Green
+  #define PWM_CHANNEL_B 2    // PWM channel for Blue
+  #define PWM_FREQ 5000      // PWM frequency
+  #define PWM_RESOLUTION 8   // 8-bit resolution (0-255)
+#endif
 
-CRGB leds[NUM_LEDS];
+#ifdef LED_TYPE_ADDRESSABLE
+  // Addressable LED strip (WS2812/SK6812)
+  #define LED_DATA_PIN 16    // GPIO pin for data
+  #define NUM_LEDS 1         // Number of LEDs in strip
+  #define LED_TYPE_CHIP WS2812B
+  #define COLOR_ORDER GRB
+  CRGB leds[NUM_LEDS];
+#endif
 
 // NocoDB polling (set to your API and table/view endpoint)
 const char* NOCODB_BASE_URL = "https://noco.app.p7n.net"; // e.g., https://nocodb.example.com
@@ -44,6 +65,7 @@ String DEVICE_NAME;
 String HOSTNAME;      // Display name (e.g., luke3a7.cross)
 String MDNS_HOSTNAME; // Actual mDNS name (e.g., luke3a7.local)
 String AP_SSID;
+String DEVICE_KEY;    // Stable unique identifier derived from chip MAC
 Preferences preferences;
 WebServer server(80);
 DNSServer dnsServer;
@@ -65,6 +87,9 @@ unsigned long lastNocoPollMs = 0;
 String lastPrayerSeenTs;
 long lastPrayerSeenId = 0;
 long intercessionCount = 0;
+long heartbeatCount = 0;  // Activity level counter (increments on each heartbeat)
+bool versionSyncPending = false; // Tracks if firmware version needs DB sync
+String versionSyncVersion;
 
 // OTA update state
 unsigned long lastOTACheckMs = 0;
@@ -74,21 +99,76 @@ const uint32_t OTA_CHECK_INTERVAL_MS = 86400000; // 24 hours in milliseconds
 bool connectToSavedWiFi();
 void startAPMode();
 void loadDeviceConfig();
+String computeDeviceKey();
 void handlePortal();
 void handlePortalSave();
 void handleStatusAPI();
 void handleScanWiFiAPI();
 void handleConfigureWiFiAPI();
+void handleWiFiReset();
 void handleOTAUpdate();
 void checkForUpdate();
 void startHttpServer(bool inAPMode);
 void startmDNS();
 void runPrayerPulse();
+void runAPModePulse();
 void pollPrayersIfDue();
 void pollPrayers();
 void registerCrossIfNeeded();
 bool fetchExistingCross();
 bool createCrossRecord();
+bool updateCrossVersionInNocoDB();
+void attemptVersionSyncIfPending();
+bool verifyCrossIdExists();
+
+// ============================================================================
+// SETUP & LOOP
+// ============================================================================
+
+// ============================================================================
+// LED ABSTRACTION LAYER
+// ============================================================================
+
+void initLEDs() {
+#ifdef LED_TYPE_COMMON_ANODE
+  ledcAttach(LED_PIN_R, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttach(LED_PIN_G, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttach(LED_PIN_B, PWM_FREQ, PWM_RESOLUTION);
+  ledcWrite(LED_PIN_R, 255);
+  ledcWrite(LED_PIN_G, 255);
+  ledcWrite(LED_PIN_B, 255);
+#endif
+#ifdef LED_TYPE_ADDRESSABLE
+  FastLED.addLeds<LED_TYPE_CHIP, LED_DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.clear();
+  FastLED.show();
+#endif
+}
+
+void setLEDColor(uint8_t r, uint8_t g, uint8_t b) {
+#ifdef LED_TYPE_COMMON_ANODE
+  // Common anode: invert values (255 = off, 0 = on)
+  ledcWrite(LED_PIN_R, 255 - r);
+  ledcWrite(LED_PIN_G, 255 - g);
+  ledcWrite(LED_PIN_B, 255 - b);
+#endif
+#ifdef LED_TYPE_ADDRESSABLE
+  leds[0] = CRGB(r, g, b);
+  FastLED.show();
+#endif
+}
+
+void clearLEDs() {
+#ifdef LED_TYPE_COMMON_ANODE
+  ledcWrite(LED_PIN_R, 255);
+  ledcWrite(LED_PIN_G, 255);
+  ledcWrite(LED_PIN_B, 255);
+#endif
+#ifdef LED_TYPE_ADDRESSABLE
+  FastLED.clear();
+  FastLED.show();
+#endif
+}
 
 // ============================================================================
 // SETUP & LOOP
@@ -98,11 +178,10 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // Initialize WS2812B LEDs
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  FastLED.setBrightness(100);
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
+  // Initialize LED strip
+  initLEDs();
+  // Subtle boot pulse to indicate power-on
+  runBootPulse();
 
   Serial.println("CROSS WiFi Onboarding v" + String(FIRMWARE_VERSION));
   preferences.begin("cross", false);
@@ -113,6 +192,9 @@ void setup() {
   lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
   lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
   intercessionCount = preferences.getLong("intercession_count", 0);
+  heartbeatCount = preferences.getLong("heartbeat_count", 0);
+  versionSyncPending = preferences.getBool("version_sync_pending", false);
+  versionSyncVersion = preferences.getString("version_sync_version", "");
 
   if (!connectToSavedWiFi()) {
     startAPMode();
@@ -121,6 +203,7 @@ void setup() {
     startHttpServer(false);
     syncTimeWithNTP();
     registerCrossIfNeeded();
+    attemptVersionSyncIfPending();
     // Ensure NocoDB reflects current firmware on boot
     updateCrossVersionInNocoDB();
     // Check for OTA update on boot
@@ -133,6 +216,12 @@ void setup() {
 void loop() {
   if (apModeActive) {
     dnsServer.processNextRequest();
+    // Pulse yellow every 5 seconds to indicate AP mode
+    static unsigned long lastAPPulse = 0;
+    if (millis() - lastAPPulse > 5000) {
+      lastAPPulse = millis();
+      runAPModePulse();
+    }
   }
   if (serverStarted) {
     server.handleClient();
@@ -187,11 +276,24 @@ void loadDeviceConfig() {
     preferences.putString("device_name", DEVICE_NAME);
   }
 
+  DEVICE_KEY = preferences.getString("device_key", "");
+  if (DEVICE_KEY == "") {
+    DEVICE_KEY = computeDeviceKey();
+    preferences.putString("device_key", DEVICE_KEY);
+  }
+
   AP_SSID = DEVICE_NAME;
   HOSTNAME = DEVICE_NAME + ".cross";
   MDNS_HOSTNAME = DEVICE_NAME + ".local";
 
   Serial.println("CFG name=" + DEVICE_NAME + " mdns=" + MDNS_HOSTNAME + " ap_ssid=" + AP_SSID);
+}
+
+String computeDeviceKey() {
+  uint64_t mac = ESP.getEfuseMac();
+  char buf[17];
+  snprintf(buf, sizeof(buf), "%012llX", (unsigned long long)mac);
+  return String(buf);
 }
 
 // ============================================================================
@@ -253,11 +355,41 @@ void startAPMode() {
 
   Serial.println("AP ip=192.168.4.1 ssid=" + AP_SSID);
   Serial.println("Portal http://192.168.4.1/ or http://" + MDNS_HOSTNAME + "/");
+  
+  // Indicate AP mode with yellow pulse
+  runAPModePulse();
 }
 
 // ============================================================================
-// PRAYER INDICATOR
+// LED INDICATORS
 // ============================================================================
+
+void runAPModePulse() {
+  // AP mode indicator: slow, dark purple pulse
+  const uint8_t pulseSpeed = 50;   // slower fade speed
+  const uint8_t maxBrightness = 40; // darker purple cap
+  
+  // Dark purple RGB values (low R+B, no G)
+  // Fade in
+  for (uint8_t brightness = 0; brightness <= maxBrightness; brightness += 5) {
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 255);
+    setLEDColor(scaledValue, 0, scaledValue);
+    delay(pulseSpeed);
+  }
+  
+  // Hold bright briefly
+  delay(400);
+  
+  // Fade out
+  for (uint8_t brightness = maxBrightness; brightness > 0; brightness -= 5) {
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 255);
+    setLEDColor(scaledValue, 0, scaledValue);
+    delay(pulseSpeed);
+  }
+  
+  // Turn off
+  clearLEDs();
+}
 
 void runPrayerPulse() {
   // Prayer pulse effect: fade in cyan, hold, fade out
@@ -265,10 +397,11 @@ void runPrayerPulse() {
   const uint8_t pulseSpeed = 20;  // milliseconds per brightness step
   const uint8_t maxBrightness = 100;
   
+  // Cyan RGB values (0, 255, 255)
   // Fade in
   for (uint8_t brightness = 0; brightness <= maxBrightness; brightness += 5) {
-    fill_solid(leds, NUM_LEDS, CHSV(128, 200, brightness)); // Cyan (HSV)
-    FastLED.show();
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 255);
+    setLEDColor(0, scaledValue, scaledValue);
     delay(pulseSpeed);
   }
   
@@ -277,16 +410,54 @@ void runPrayerPulse() {
   
   // Fade out
   for (uint8_t brightness = maxBrightness; brightness > 0; brightness -= 5) {
-    fill_solid(leds, NUM_LEDS, CHSV(128, 200, brightness));
-    FastLED.show();
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 255);
+    setLEDColor(0, scaledValue, scaledValue);
     delay(pulseSpeed);
   }
   
   // Turn off
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
+  clearLEDs();
   
   Serial.println("[LED] Prayer pulse complete");
+}
+
+void attemptVersionSyncIfPending() {
+  if (!versionSyncPending && versionSyncVersion == FIRMWARE_VERSION) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (crossId.length() == 0 || crossId == "null") return;
+
+  const int maxAttempts = 3;
+  for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    if (updateCrossVersionInNocoDB()) {
+      Serial.println("[NocoDB] Version sync cleared");
+      return;
+    }
+    delay(500);
+  }
+  Serial.println("[NocoDB] Version sync still pending after retries");
+}
+
+void runBootPulse() {
+  // Subtle boot pulse: brief low-intensity teal glow
+  const uint8_t pulseSpeed = 25;
+  const uint8_t maxBrightness = 50;
+
+  // Teal (mix of green/blue, low intensity)
+  for (uint8_t brightness = 0; brightness <= maxBrightness; brightness += 5) {
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 180);
+    setLEDColor(0, scaledValue, scaledValue);
+    delay(pulseSpeed);
+  }
+
+  delay(200);
+
+  for (uint8_t brightness = maxBrightness; brightness > 0; brightness -= 5) {
+    uint8_t scaledValue = map(brightness, 0, maxBrightness, 0, 180);
+    setLEDColor(0, scaledValue, scaledValue);
+    delay(pulseSpeed);
+  }
+
+  clearLEDs();
 }
 
 // ============================================================================
@@ -295,8 +466,14 @@ void runPrayerPulse() {
 
 void registerCrossIfNeeded() {
   if (crossId.length() > 0 && crossId != "null") {
-    Serial.println("[NocoDB] Cross already registered id=" + crossId);
-    return;
+    if (verifyCrossIdExists()) {
+      Serial.println("[NocoDB] Cross already registered id=" + crossId);
+      return;
+    }
+    // Existing id not found on server; clear and re-register
+    Serial.println("[NocoDB] Stored cross id missing on server, re-registering");
+    crossId = "";
+    preferences.putString("cross_id", "");
   }
 
   // Clear bad null values
@@ -316,7 +493,7 @@ bool fetchExistingCross() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH);
-  url += "?where=(device_name,eq," + DEVICE_NAME + ")";
+  url += "?where=(device_key,eq," + DEVICE_KEY + ")";
 
   Serial.println("[NocoDB] Lookup URL: " + url);
 
@@ -355,6 +532,31 @@ bool fetchExistingCross() {
     records = doc["data"].as<JsonArray>();
   }
 
+  // Fallback lookup by device_name if device_key not present on server
+  if (records.isNull() || records.size() == 0) {
+    String urlByName = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(device_name,eq," + DEVICE_NAME + ")";
+    Serial.println("[NocoDB] Fallback lookup by name: " + urlByName);
+    HTTPClient http2;
+    WiFiClientSecure client2;
+    client2.setInsecure();
+    http2.begin(client2, urlByName);
+    if (String(NOCODB_API_TOKEN).length() > 0) {
+      http2.addHeader("xc-token", NOCODB_API_TOKEN);
+    }
+    int code2 = http2.GET();
+    if (code2 == 200) {
+      DynamicJsonDocument doc2(2048);
+      DeserializationError err2 = deserializeJson(doc2, http2.getString());
+      if (!err2) {
+        records = doc2["list"];
+        if (records.isNull()) {
+          records = doc2["data"].as<JsonArray>();
+        }
+      }
+    }
+    http2.end();
+  }
+
   if (records.isNull() || records.size() == 0) {
     Serial.println("[NocoDB] Cross not found, will create");
     return false;
@@ -377,9 +579,9 @@ bool fetchExistingCross() {
   return true;
 }
 
-void updateCrossVersionInNocoDB() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (crossId.length() == 0 || crossId == "null") return;
+bool updateCrossVersionInNocoDB() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (crossId.length() == 0 || crossId == "null") return false;
 
   String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
 
@@ -403,14 +605,19 @@ void updateCrossVersionInNocoDB() {
   int code = http.PATCH(payload);
   Serial.println("[NocoDB] Update version response code: " + String(code));
 
-  if (code < 200 || code >= 300) {
+  bool success = (code >= 200 && code < 300);
+  if (!success) {
     Serial.println("[NocoDB] Version update failed code=" + String(code));
     String response = http.getString();
     Serial.println("[NocoDB] Error: " + response);
   } else {
     Serial.println("[NocoDB] Version updated successfully");
+    versionSyncPending = false;
+    preferences.putBool("version_sync_pending", false);
+    preferences.putString("version_sync_version", FIRMWARE_VERSION);
   }
   http.end();
+  return success;
 }
 
 void updateCrossIntercessionCount() {
@@ -448,6 +655,10 @@ void updateCrossHeartbeat() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (crossId.length() == 0 || crossId == "null") return;
 
+  // Increment heartbeat counter for activity level
+  heartbeatCount++;
+  preferences.putLong("heartbeat_count", heartbeatCount);
+
   String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
 
   // Use RFC3339 format timestamp for compatibility
@@ -456,9 +667,10 @@ void updateCrossHeartbeat() {
   char timestamp[30];
   strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
 
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<512> doc;
   doc["Id"] = crossId;
   doc["last_heartbeat"] = String(timestamp);
+  doc["heartbeat_count"] = heartbeatCount;  // Sync activity level to NocoDB
 
   String payload;
   serializeJson(doc, payload);
@@ -474,7 +686,7 @@ void updateCrossHeartbeat() {
 
   int code = http.PATCH(payload);
   if (code >= 200 && code < 300) {
-    Serial.println("[NocoDB] Heartbeat updated");
+    Serial.println("[NocoDB] Heartbeat updated count=" + String(heartbeatCount));
   } else {
     Serial.println("[NocoDB] Heartbeat update failed code=" + String(code));
   }
@@ -489,6 +701,7 @@ bool createCrossRecord() {
   StaticJsonDocument<512> doc;
   doc["name"] = DEVICE_NAME;
   doc["device_name"] = DEVICE_NAME;
+  doc["device_key"] = DEVICE_KEY;
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["status"] = "active";
   doc["intercession_count"] = intercessionCount;
@@ -513,6 +726,12 @@ bool createCrossRecord() {
     Serial.println("[NocoDB] Cross create failed code=" + String(code));
     String response = http.getString();
     Serial.println("[NocoDB] Create error: " + response);
+    // If conflict or error, attempt to fetch existing (handles duplicate device_key)
+    if (code == 409 || code == 400) {
+      Serial.println("[NocoDB] Retry fetch after create conflict");
+      http.end();
+      return fetchExistingCross();
+    }
     http.end();
     return false;
   }
@@ -550,9 +769,89 @@ bool createCrossRecord() {
   return true;
 }
 
+bool verifyCrossIdExists() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (crossId.length() == 0 || crossId == "null") return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.println("[NocoDB] verify id failed code=" + String(code));
+    http.end();
+    return false;
+  }
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) return false;
+
+  JsonArray records = doc["list"];
+  if (records.isNull()) records = doc["data"].as<JsonArray>();
+  if (records.isNull() || records.size() == 0) return false;
+  return true;
+}
+
 // ============================================================================
 // NOCODB POLLING (Prayers)
 // ============================================================================
+
+bool isCrossActive() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (crossId.length() == 0 || crossId == "null") return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.println("[NocoDB] Failed to check cross status code=" + String(code));
+    http.end();
+    return false;
+  }
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+
+  if (err) {
+    Serial.println("[NocoDB] Status check JSON parse error");
+    return false;
+  }
+
+  JsonArray records = doc["list"];
+  if (records.isNull()) {
+    records = doc["data"].as<JsonArray>();
+  }
+
+  if (records.isNull() || records.size() == 0) {
+    Serial.println("[NocoDB] Cross record not found");
+    return false;
+  }
+
+  JsonObject rec = records[0];
+  String status = rec["status"].as<String>();
+  bool isActive = (status == "active");
+  
+  Serial.println("[NocoDB] Cross status: " + status + " (active=" + String(isActive) + ")");
+  return isActive;
+}
 
 void pollPrayersIfDue() {
   unsigned long now = millis();
@@ -570,6 +869,13 @@ void checkForOTAUpdateIfDue() {
 
 void pollPrayers() {
   if (WiFi.status() != WL_CONNECTED) return;
+  if (crossId.length() == 0 || crossId == "null") return;
+
+  // Check if this cross is active before processing prayers
+  if (!isCrossActive()) {
+    Serial.println("[NocoDB] Cross not active, skipping prayers");
+    return;
+  }
 
   // Update heartbeat
   updateCrossHeartbeat();
@@ -675,6 +981,7 @@ void handleStatusAPI() {
   doc["ip"] = apModeActive ? "192.168.4.1" : WiFi.localIP().toString();
   doc["wifi_saved"] = preferences.getString("wifi_ssid", "") != "";
   doc["intercession_count"] = intercessionCount;
+  doc["heartbeat_count"] = heartbeatCount;
 
   String response;
   serializeJson(doc, response);
@@ -812,6 +1119,17 @@ void handleConfigureWiFiAPI() {
   ESP.restart();
 }
 
+void handleWiFiReset() {
+  Serial.println("WiFi reset requested");
+  
+  preferences.putString("wifi_ssid", "");
+  preferences.putString("wifi_password", "");
+  
+  server.send(200, "application/json", "{\"status\": \"reset\", \"message\": \"WiFi credentials cleared, rebooting...\"}");
+  delay(1000);
+  ESP.restart();
+}
+
 // ============================================================================
 // mDNS
 // ============================================================================
@@ -839,6 +1157,7 @@ void startHttpServer(bool inAPMode) {
   server.on("/api/status", HTTP_GET, handleStatusAPI);
   server.on("/api/scan-wifi", HTTP_GET, handleScanWiFiAPI);
   server.on("/api/configure-wifi", HTTP_POST, handleConfigureWiFiAPI);
+  server.on("/api/reset-wifi", HTTP_POST, handleWiFiReset);
   server.on("/api/update", HTTP_POST, handleOTAUpdate);
 
   server.begin();
@@ -930,7 +1249,9 @@ void checkForUpdate() {
                 return;
               case HTTP_UPDATE_OK:
                 Serial.println("Update successful, rebooting...");
-                // Ensure cross exists then update version in NocoDB before rebooting
+                // Mark version sync pending, ensure cross exists, then update DB before rebooting
+                preferences.putBool("version_sync_pending", true);
+                preferences.putString("version_sync_version", FIRMWARE_VERSION);
                 registerCrossIfNeeded();
                 updateCrossVersionInNocoDB();
                 delay(1000);
