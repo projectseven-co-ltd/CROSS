@@ -22,7 +22,7 @@
 #include <FastLED.h>
 #endif
 
-const char* FIRMWARE_VERSION = "3.3";
+const char* FIRMWARE_VERSION = "3.4";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // LED Strip Configuration
