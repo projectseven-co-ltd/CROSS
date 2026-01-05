@@ -31,7 +31,7 @@ ESP32-based prayer crosses that form a geo-aware network. Users submit prayer re
 ## 1. System Architecture
 
 ### Components
-- **ESP32 Devices** (Prayer Crosses)
+- **ESP32 Devices** (Prayer Crosses) using ESP-32S dev board with ESP-WROOM-32 module
 - **n8n Workflow Engine** (Business logic & API layer)
 - **NocoDB Database** (Data persistence)
 - **Mobile App** (User interface for prayer submission)
@@ -52,7 +52,7 @@ ESP32 Updates (LED color, display, etc.)
 ## 2. Hardware & Power (ESP32 Cross)
 
 ### Core MCU
-- ESP32 Nano (WiFi/BLE) + expansion header
+- ESP-32S dev board with ESP-WROOM-32 module (WiFi/BLE) + expansion header
 - Supports I2C/SPI/UART for display/sensors
 - Sleep-capable for low-power polling
 
@@ -100,93 +100,6 @@ ESP32 Updates (LED color, display, etc.)
 ## 3. Database Schema (NocoDB)
 
 **Note:** When importing CSVs, relation/link fields (e.g., geo_area_id, user_id) must be created as 'Link to another record' fields in NocoDB. If imported as standard fields, you must delete and recreate them as link fields to enable relationships. See 'Adjusting for NocoDB Import Limitations' below for details.
-
-### Setting Up Table Relationships in NocoDB
-
-#### 1. Link crosses.geo_area_id to geo_areas.id
-  - Open the crosses table.
-  - Edit the geo_area_id field.
-  - Set the field type to "Relation" or "Link to another table".
-  - Select geo_areas as the target table and id as the target field.
-  - Save changes.
-
-#### 2. Link crosses.user_id to users.id (optional/user-maintained)
-  - Open the crosses table.
-  - Edit the user_id field.
-  - Set the field type to "Relation" or "Link to another table".
-  - Select users as the target table and id as the target field.
-  - Allow empty values for community crosses.
-  - Save changes.
-
-#### 3. Link prayers.user_id to users.id
-  - Open the prayers table.
-  - Edit the user_id field.
-  - Set the field type to "Relation" or "Link to another table".
-  - Select users as the target table and id as the target field.
-  - Save changes.
-
-#### 4. Link prayers.geo_area_id to geo_areas.id
-  - Open the prayers table.
-  - Edit the geo_area_id field.
-  - Set the field type to "Relation" or "Link to another table".
-  - Select geo_areas as the target table and id as the target field.
-  - Save changes.
-
-After these steps, your tables will be fully linked and you can use NocoDB’s relational features for lookups, filters, and automations.
-
-### Table: crosses
-**Relationships:**
-- user_id: Many-to-One (many crosses can be maintained by one user; nullable for community crosses)
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | Number | Unique identifier |
-| name | String | Cross name/location |
-| user_id | Link to users (nullable) | Maintainer/owner if user-maintained, blank for community crosses |
-| status | Single Select | active/inactive/error |
-| last_heartbeat | DateTime | Last communication |
-| firmware_version | String | ESP32 firmware version |
-
-### Table: geo_areas
-**Relationships:**
-- id: One-to-Many (one geo_area has many crosses and many prayers)
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | Number | Unique identifier |
-| name | String | Area name (city, region) |
-| center_lat | Number | Geographic center |
-| center_lon | Number | Geographic center |
-| radius_km | Number | Search radius for crosses |
-| prayer_threshold_low | Number | Threshold for color changes |
-| prayer_threshold_high | Number | Threshold for color changes |
-
-### Table: prayers
-**Relationships:**
-- user_id: Many-to-One (many prayers per user)
-- geo_area_id: Many-to-One (many prayers per geo_area)
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | Number | Unique identifier |
-| user_id | Link to users | Who submitted prayer |
-| geo_area_id | Link to geo_areas | Target area |
-| title | String | Prayer title |
-| description | Text | Prayer request details |
-| scripture_reference | String | Optional: Related Bible verse (Mark 8:34, Luke 9:23, etc.) |
-| expires_at | DateTime | When prayer expires (auto-remove) |
-| status | Single Select | active/completed/archived |
-| burden_level | Single Select | light/moderate/heavy | (How urgent the prayer need is)
-| intercession_count | Number | How many times this was interceded for |
-
-### Table: users
-**Relationships:**
-- id: One-to-Many (one user can maintain many crosses and submit many prayers)
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | Number | Unique identifier |
-| phone | String | Phone number (for app auth) |
-| email | String | User email address |
-| name | String | User name |
-
----
 
 ## 4. n8n Workflows
 

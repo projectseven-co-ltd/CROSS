@@ -96,6 +96,39 @@ String versionSyncVersion;
 unsigned long lastOTACheckMs = 0;
 const uint32_t OTA_CHECK_INTERVAL_MS = 86400000; // 24 hours in milliseconds
 
+// In-memory log ring buffer exposed via /api/logs
+const size_t LOG_CAPACITY = 150;
+String logBuffer[LOG_CAPACITY];
+size_t logHead = 0;
+size_t logCount = 0;
+
+void appendLog(const String &line) {
+  logBuffer[logHead] = line;
+  logHead = (logHead + 1) % LOG_CAPACITY;
+  if (logCount < LOG_CAPACITY) {
+    logCount++;
+  }
+}
+
+void logLine(const String &line) {
+  Serial.println(line);
+  appendLog(line);
+}
+
+String buildLogDump() {
+  if (logCount == 0) return String("no logs yet");
+
+  String dump;
+  dump.reserve(logCount * 48);
+  size_t startIndex = (logHead + LOG_CAPACITY - logCount) % LOG_CAPACITY;
+  for (size_t i = 0; i < logCount; i++) {
+    size_t idx = (startIndex + i) % LOG_CAPACITY;
+    dump += logBuffer[idx];
+    if (i < logCount - 1) dump += "\n";
+  }
+  return dump;
+}
+
 // Forward declarations
 bool connectToSavedWiFi();
 void startAPMode();
@@ -109,6 +142,7 @@ void handleConfigureWiFiAPI();
 void handleWiFiReset();
 void handleSetName();
 void handleSetToken();
+void handleLogsAPI();
 void handleOTAUpdate();
 bool isAuthorized();
 void checkForUpdate();
@@ -187,7 +221,7 @@ void setup() {
   // Subtle boot pulse to indicate power-on
   runBootPulse();
 
-  Serial.println("CROSS WiFi Onboarding v" + String(FIRMWARE_VERSION));
+  logLine("CROSS WiFi Onboarding v" + String(FIRMWARE_VERSION));
   preferences.begin("cross", false);
   loadDeviceConfig();
 
@@ -215,7 +249,7 @@ void setup() {
     checkForUpdate();
   }
 
-  Serial.println("READY");
+  logLine("READY");
 }
 
 void loop() {
@@ -243,7 +277,7 @@ void loop() {
 // ============================================================================
 
 void syncTimeWithNTP() {
-  Serial.println("Syncing time with NTP...");
+  logLine("Syncing time with NTP...");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   
   time_t now = time(nullptr);
@@ -254,12 +288,12 @@ void syncTimeWithNTP() {
     now = time(nullptr);
     attempts++;
   }
-  Serial.println();
+  logLine("");
   
   if (now > 24 * 3600) {
-    Serial.println("Time synced: " + String(ctime(&now)));
+    logLine("Time synced: " + String(ctime(&now)));
   } else {
-    Serial.println("NTP sync failed, time may be incorrect");
+    logLine("NTP sync failed, time may be incorrect");
   }
 }
 
@@ -291,7 +325,7 @@ void loadDeviceConfig() {
   HOSTNAME = DEVICE_NAME + ".cross";
   MDNS_HOSTNAME = DEVICE_NAME + ".local";
 
-  Serial.println("CFG name=" + DEVICE_NAME + " mdns=" + MDNS_HOSTNAME + " ap_ssid=" + AP_SSID);
+  logLine("CFG name=" + DEVICE_NAME + " mdns=" + MDNS_HOSTNAME + " ap_ssid=" + AP_SSID);
 }
 
 String computeDeviceKey() {
@@ -308,12 +342,12 @@ String computeDeviceKey() {
 bool connectToSavedWiFi() {
   String ssid = preferences.getString("wifi_ssid", "");
   if (ssid == "") {
-    Serial.println("[WiFi] No saved credentials");
+    logLine("[WiFi] No saved credentials");
     return false;
   }
 
   String pwd = preferences.getString("wifi_password", "");
-  Serial.println("[WiFi] Connecting to: " + ssid);
+  logLine("[WiFi] Connecting to: " + ssid);
 
   WiFi.mode(WIFI_STA);
   
@@ -330,22 +364,22 @@ bool connectToSavedWiFi() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n[WiFi] Connected! IP: " + WiFi.localIP().toString());
+      logLine("[WiFi] Connected! IP: " + WiFi.localIP().toString());
       apModeActive = false;
       isConnected = true;
       return true;
     }
     
-    Serial.println("\n[WiFi] Attempt " + String(attempt + 1) + " failed, retrying...");
+    logLine("[WiFi] Attempt " + String(attempt + 1) + " failed, retrying...");
     delay(2000); // Wait 2 seconds before next attempt
   }
 
-  Serial.println("[WiFi] Failed after 3 attempts, starting AP mode");
+  logLine("[WiFi] Failed after 3 attempts, starting AP mode");
   return false;
 }
 
 void startAPMode() {
-  Serial.println("AP start ssid=" + AP_SSID);
+  logLine("AP start ssid=" + AP_SSID);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
   WiFi.softAP(AP_SSID.c_str());
@@ -358,8 +392,8 @@ void startAPMode() {
 
   startHttpServer(true);
 
-  Serial.println("AP ip=192.168.4.1 ssid=" + AP_SSID);
-  Serial.println("Portal http://192.168.4.1/ or http://" + MDNS_HOSTNAME + "/");
+  logLine("AP ip=192.168.4.1 ssid=" + AP_SSID);
+  logLine("Portal http://192.168.4.1/ or http://" + MDNS_HOSTNAME + "/");
   
   // Indicate AP mode with yellow pulse
   runAPModePulse();
@@ -423,7 +457,7 @@ void runPrayerPulse() {
   // Turn off
   clearLEDs();
   
-  Serial.println("[LED] Prayer pulse complete");
+  logLine("[LED] Prayer pulse complete");
 }
 
 void attemptVersionSyncIfPending() {
@@ -434,12 +468,12 @@ void attemptVersionSyncIfPending() {
   const int maxAttempts = 3;
   for (int attempt = 0; attempt < maxAttempts; attempt++) {
     if (updateCrossVersionInNocoDB()) {
-      Serial.println("[NocoDB] Version sync cleared");
+      logLine("[NocoDB] Version sync cleared");
       return;
     }
     delay(500);
   }
-  Serial.println("[NocoDB] Version sync still pending after retries");
+  logLine("[NocoDB] Version sync still pending after retries");
 }
 
 void runBootPulse() {
@@ -472,11 +506,11 @@ void runBootPulse() {
 void registerCrossIfNeeded() {
   if (crossId.length() > 0 && crossId != "null") {
     if (verifyCrossIdExists()) {
-      Serial.println("[NocoDB] Cross already registered id=" + crossId);
+      logLine("[NocoDB] Cross already registered id=" + crossId);
       return;
     }
     // Existing id not found on server; clear and re-register
-    Serial.println("[NocoDB] Stored cross id missing on server, re-registering");
+    logLine("[NocoDB] Stored cross id missing on server, re-registering");
     crossId = "";
     preferences.putString("cross_id", "");
   }
@@ -500,7 +534,7 @@ bool fetchExistingCross() {
   String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH);
   url += "?where=(device_key,eq," + DEVICE_KEY + ")";
 
-  Serial.println("[NocoDB] Lookup URL: " + url);
+  logLine("[NocoDB] Lookup URL: " + url);
 
   HTTPClient http;
   WiFiClientSecure client;
@@ -511,24 +545,24 @@ bool fetchExistingCross() {
   }
 
   int code = http.GET();
-  Serial.println("[NocoDB] Lookup response code: " + String(code));
+  logLine("[NocoDB] Lookup response code: " + String(code));
   
   if (code != 200) {
-    Serial.println("[NocoDB] Cross lookup failed code=" + String(code));
+    logLine("[NocoDB] Cross lookup failed code=" + String(code));
     String response = http.getString();
-    Serial.println("[NocoDB] Response: " + response);
+    logLine("[NocoDB] Response: " + response);
     http.end();
     return false;
   }
 
   String response = http.getString();
-  Serial.println("[NocoDB] Lookup response: " + response.substring(0, 200));
+  logLine("[NocoDB] Lookup response: " + response.substring(0, 200));
 
   DynamicJsonDocument doc(2048);
   DeserializationError err = deserializeJson(doc, response);
   http.end();
   if (err) {
-    Serial.println("[NocoDB] Cross lookup JSON parse error: " + String(err.c_str()));
+    logLine("[NocoDB] Cross lookup JSON parse error: " + String(err.c_str()));
     return false;
   }
 
@@ -540,7 +574,7 @@ bool fetchExistingCross() {
   // Fallback lookup by device_name if device_key not present on server
   if (records.isNull() || records.size() == 0) {
     String urlByName = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(device_name,eq," + DEVICE_NAME + ")";
-    Serial.println("[NocoDB] Fallback lookup by name: " + urlByName);
+    logLine("[NocoDB] Fallback lookup by name: " + urlByName);
     HTTPClient http2;
     WiFiClientSecure client2;
     client2.setInsecure();
@@ -563,14 +597,14 @@ bool fetchExistingCross() {
   }
 
   if (records.isNull() || records.size() == 0) {
-    Serial.println("[NocoDB] Cross not found, will create");
+    logLine("[NocoDB] Cross not found, will create");
     return false;
   }
 
   JsonObject rec = records[0];
   String id = rec["Id"].as<String>();
   if (id.length() == 0) {
-    Serial.println("[NocoDB] Cross lookup missing Id");
+    logLine("[NocoDB] Cross lookup missing Id");
     return false;
   }
 
@@ -580,7 +614,7 @@ bool fetchExistingCross() {
     intercessionCount = rec["intercession_count"].as<long>();
     preferences.putLong("intercession_count", intercessionCount);
   }
-  Serial.println("[NocoDB] Cross found id=" + crossId);
+  logLine("[NocoDB] Cross found id=" + crossId);
   return true;
 }
 
@@ -596,7 +630,7 @@ bool updateCrossVersionInNocoDB() {
 
   String payload;
   serializeJson(doc, payload);
-  Serial.println("[NocoDB] Update version payload: " + payload);
+  logLine("[NocoDB] Update version payload: " + payload);
 
   HTTPClient http;
   WiFiClientSecure client;
@@ -608,15 +642,15 @@ bool updateCrossVersionInNocoDB() {
   }
 
   int code = http.PATCH(payload);
-  Serial.println("[NocoDB] Update version response code: " + String(code));
+  logLine("[NocoDB] Update version response code: " + String(code));
 
   bool success = (code >= 200 && code < 300);
   if (!success) {
-    Serial.println("[NocoDB] Version update failed code=" + String(code));
+    logLine("[NocoDB] Version update failed code=" + String(code));
     String response = http.getString();
-    Serial.println("[NocoDB] Error: " + response);
+    logLine("[NocoDB] Error: " + response);
   } else {
-    Serial.println("[NocoDB] Version updated successfully");
+    logLine("[NocoDB] Version updated successfully");
     versionSyncPending = false;
     preferences.putBool("version_sync_pending", false);
     preferences.putString("version_sync_version", FIRMWARE_VERSION);
@@ -649,9 +683,9 @@ void updateCrossIntercessionCount() {
 
   int code = http.PATCH(payload);
   if (code < 200 || code >= 300) {
-    Serial.println("[NocoDB] Intercession update failed code=" + String(code));
+    logLine("[NocoDB] Intercession update failed code=" + String(code));
   } else {
-    Serial.println("[NocoDB] Intercession count updated to " + String(intercessionCount));
+    logLine("[NocoDB] Intercession count updated to " + String(intercessionCount));
   }
   http.end();
 }
@@ -691,9 +725,9 @@ void updateCrossHeartbeat() {
 
   int code = http.PATCH(payload);
   if (code >= 200 && code < 300) {
-    Serial.println("[NocoDB] Heartbeat updated count=" + String(heartbeatCount));
+    logLine("[NocoDB] Heartbeat updated count=" + String(heartbeatCount));
   } else {
-    Serial.println("[NocoDB] Heartbeat update failed code=" + String(code));
+    logLine("[NocoDB] Heartbeat update failed code=" + String(code));
   }
   http.end();
 }
@@ -713,7 +747,7 @@ bool createCrossRecord() {
 
   String payload;
   serializeJson(doc, payload);
-  Serial.println("[NocoDB] Create payload: " + payload);
+  logLine("[NocoDB] Create payload: " + payload);
 
   HTTPClient http;
   WiFiClientSecure client;
@@ -725,15 +759,15 @@ bool createCrossRecord() {
   }
 
   int code = http.POST(payload);
-  Serial.println("[NocoDB] Create response code: " + String(code));
+  logLine("[NocoDB] Create response code: " + String(code));
   
   if (code < 200 || code >= 300) {
-    Serial.println("[NocoDB] Cross create failed code=" + String(code));
+    logLine("[NocoDB] Cross create failed code=" + String(code));
     String response = http.getString();
-    Serial.println("[NocoDB] Create error: " + response);
+    logLine("[NocoDB] Create error: " + response);
     // If conflict or error, attempt to fetch existing (handles duplicate device_key)
     if (code == 409 || code == 400) {
-      Serial.println("[NocoDB] Retry fetch after create conflict");
+      logLine("[NocoDB] Retry fetch after create conflict");
       http.end();
       return fetchExistingCross();
     }
@@ -742,13 +776,13 @@ bool createCrossRecord() {
   }
 
   String response = http.getString();
-  Serial.println("[NocoDB] Create response: " + response.substring(0, 200));
+  logLine("[NocoDB] Create response: " + response.substring(0, 200));
 
   DynamicJsonDocument resp(2048);
   DeserializationError err = deserializeJson(resp, response);
   http.end();
   if (err) {
-    Serial.println("[NocoDB] Cross create JSON parse error: " + String(err.c_str()));
+    logLine("[NocoDB] Cross create JSON parse error: " + String(err.c_str()));
     return false;
   }
 
@@ -764,13 +798,13 @@ bool createCrossRecord() {
   }
 
   if (id.length() == 0) {
-    Serial.println("[NocoDB] Cross create missing Id");
+    logLine("[NocoDB] Cross create missing Id");
     return false;
   }
 
   crossId = id;
   preferences.putString("cross_id", crossId);
-  Serial.println("[NocoDB] Cross created id=" + crossId);
+  logLine("[NocoDB] Cross created id=" + crossId);
   return true;
 }
 
@@ -790,7 +824,7 @@ bool verifyCrossIdExists() {
 
   int code = http.GET();
   if (code != 200) {
-    Serial.println("[NocoDB] verify id failed code=" + String(code));
+    logLine("[NocoDB] verify id failed code=" + String(code));
     http.end();
     return false;
   }
@@ -826,7 +860,7 @@ bool isCrossActive() {
 
   int code = http.GET();
   if (code != 200) {
-    Serial.println("[NocoDB] Failed to check cross status code=" + String(code));
+    logLine("[NocoDB] Failed to check cross status code=" + String(code));
     http.end();
     return false;
   }
@@ -836,7 +870,7 @@ bool isCrossActive() {
   http.end();
 
   if (err) {
-    Serial.println("[NocoDB] Status check JSON parse error");
+    logLine("[NocoDB] Status check JSON parse error");
     return false;
   }
 
@@ -846,7 +880,7 @@ bool isCrossActive() {
   }
 
   if (records.isNull() || records.size() == 0) {
-    Serial.println("[NocoDB] Cross record not found");
+    logLine("[NocoDB] Cross record not found");
     return false;
   }
 
@@ -854,7 +888,7 @@ bool isCrossActive() {
   String status = rec["status"].as<String>();
   bool isActive = (status == "active");
   
-  Serial.println("[NocoDB] Cross status: " + status + " (active=" + String(isActive) + ")");
+  logLine("[NocoDB] Cross status: " + status + " (active=" + String(isActive) + ")");
   return isActive;
 }
 
@@ -878,7 +912,7 @@ void pollPrayers() {
 
   // Check if this cross is active before processing prayers
   if (!isCrossActive()) {
-    Serial.println("[NocoDB] Cross not active, skipping prayers");
+    logLine("[NocoDB] Cross not active, skipping prayers");
     return;
   }
 
@@ -902,9 +936,9 @@ void pollPrayers() {
   }
   int code = http.GET();
   if (code != 200) {
-    Serial.println("[NocoDB] GET failed code=" + String(code));
+    logLine("[NocoDB] GET failed code=" + String(code));
     String resp = http.getString();
-    Serial.println("[NocoDB] GET body: " + resp);
+    logLine("[NocoDB] GET body: " + resp);
     http.end();
     return;
   }
@@ -912,7 +946,7 @@ void pollPrayers() {
   DynamicJsonDocument doc(4096);
   DeserializationError err = deserializeJson(doc, http.getStream());
   if (err) {
-    Serial.println("[NocoDB] JSON parse error");
+    logLine("[NocoDB] JSON parse error");
     http.end();
     return;
   }
@@ -925,11 +959,11 @@ void pollPrayers() {
   }
 
   if (records.isNull() || records.size() == 0) {
-    Serial.println("[NocoDB] No new prayers");
+    logLine("[NocoDB] No new prayers");
     return;
   }
 
-  Serial.println("[NocoDB] Prayers fetched count=" + String(records.size()));
+  logLine("[NocoDB] Prayers fetched count=" + String(records.size()));
   String newestTs = lastPrayerSeenTs;
   long newestId = lastPrayerSeenId;
   int newPrayerCount = 0;
@@ -956,7 +990,7 @@ void pollPrayers() {
   }
 
   if (newPrayerCount > 0) {
-    Serial.println("[NocoDB] New prayers: " + String(newPrayerCount));
+    logLine("[NocoDB] New prayers: " + String(newPrayerCount));
     intercessionCount += newPrayerCount;
     preferences.putLong("intercession_count", intercessionCount);
     updateCrossIntercessionCount();
@@ -965,12 +999,12 @@ void pollPrayers() {
   if (newestTs.length() > 0 && newestTs != lastPrayerSeenTs) {
     lastPrayerSeenTs = newestTs;
     preferences.putString("last_prayer_ts", lastPrayerSeenTs);
-    Serial.println("[NocoDB] Updated last_prayer_ts=" + lastPrayerSeenTs);
+    logLine("[NocoDB] Updated last_prayer_ts=" + lastPrayerSeenTs);
   }
   if (newestId > lastPrayerSeenId) {
     lastPrayerSeenId = newestId;
     preferences.putLong("last_prayer_id", lastPrayerSeenId);
-    Serial.println("[NocoDB] Updated last_prayer_id=" + String(lastPrayerSeenId));
+    logLine("[NocoDB] Updated last_prayer_id=" + String(lastPrayerSeenId));
   }
 }
 
@@ -995,8 +1029,19 @@ void handleStatusAPI() {
   server.send(200, "application/json", response);
 }
 
+void handleLogsAPI() {
+  if (!isAuthorized()) {
+    server.send(401, "text/plain", "unauthorized");
+    return;
+  }
+
+  String dump = buildLogDump();
+  server.sendHeader("Content-Type", "text/plain");
+  server.send(200, "text/plain", dump);
+}
+
 void handleScanWiFiAPI() {
-  Serial.println("scan wifi");
+  logLine("scan wifi");
 
   int networks = WiFi.scanNetworks();
   DynamicJsonDocument doc(2048);
@@ -1106,7 +1151,7 @@ void handleConfigureWiFiAPI() {
     return;
   }
 
-  Serial.println("store wifi ssid=" + ssid);
+  logLine("store wifi ssid=" + ssid);
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
 
@@ -1131,7 +1176,7 @@ void handleWiFiReset() {
   //   return;
   // }
   
-  Serial.println("WiFi reset requested");
+  logLine("WiFi reset requested");
   
   preferences.putString("wifi_ssid", "");
   preferences.putString("wifi_password", "");
@@ -1176,7 +1221,7 @@ void handleSetToken() {
     return;
   }
 
-  Serial.println("[API] Setting API token");
+  logLine("[API] Setting API token");
   apiToken = newToken;
   preferences.putString("api_token", apiToken);
   
@@ -1217,7 +1262,7 @@ void handleSetName() {
     return;
   }
 
-  Serial.println("[API] Changing device name to: " + newName);
+  logLine("[API] Changing device name to: " + newName);
   
   // Update preferences and globals
   DEVICE_NAME = newName;
@@ -1249,9 +1294,9 @@ void handleSetName() {
     
     int code = http.PATCH(payload);
     if (code >= 200 && code < 300) {
-      Serial.println("[NocoDB] Device name updated");
+      logLine("[NocoDB] Device name updated");
     } else {
-      Serial.println("[NocoDB] Name update failed code=" + String(code));
+      logLine("[NocoDB] Name update failed code=" + String(code));
     }
     http.end();
   }
@@ -1275,7 +1320,7 @@ void handleSetName() {
 void startmDNS() {
   if (MDNS.begin(DEVICE_NAME.c_str())) {
     MDNS.addService("http", "tcp", 80);
-    Serial.println("mDNS http://" + MDNS_HOSTNAME + "/api/");
+    logLine("mDNS http://" + MDNS_HOSTNAME + "/api/");
   }
 }
 
@@ -1298,6 +1343,7 @@ void startHttpServer(bool inAPMode) {
   server.on("/api/reset-wifi", HTTP_POST, handleWiFiReset);
   server.on("/api/set-name", HTTP_POST, handleSetName);
   server.on("/api/set-token", HTTP_POST, handleSetToken);
+  server.on("/api/logs", HTTP_GET, handleLogsAPI);
   server.on("/api/update", HTTP_POST, handleOTAUpdate);
 
   server.begin();
@@ -1315,7 +1361,7 @@ void handleOTAUpdate() {
   //   return;
   // }
   
-  Serial.println("OTA update requested");
+  logLine("OTA update requested");
 
   if (!isConnected) {
     server.send(400, "application/json", "{\"error\": \"Device must be on WiFi for OTA\"}");
@@ -1331,8 +1377,8 @@ void handleOTAUpdate() {
 void checkForUpdate() {
   HTTPClient http;
 
-  Serial.println("Checking for firmware update...");
-  Serial.println("Current version: " + String(FIRMWARE_VERSION));
+  logLine("Checking for firmware update...");
+  logLine("Current version: " + String(FIRMWARE_VERSION));
 
   http.begin(GITHUB_API_URL);
   http.addHeader("Accept", "application/vnd.github+json");
@@ -1346,10 +1392,10 @@ void checkForUpdate() {
       String latestVersion = doc["tag_name"].as<String>();
       latestVersion.replace("v", "");
 
-      Serial.println("Latest version: " + latestVersion);
+      logLine("Latest version: " + latestVersion);
 
       if (latestVersion != String(FIRMWARE_VERSION)) {
-        Serial.println("New version available, finding firmware...");
+        logLine("New version available, finding firmware...");
 
         JsonArray assets = doc["assets"];
         String downloadUrl = "";
@@ -1363,7 +1409,7 @@ void checkForUpdate() {
         }
 
         if (downloadUrl.length() > 0) {
-          Serial.println("Downloading from: " + downloadUrl);
+          logLine("Downloading from: " + downloadUrl);
           http.end();
 
           // Use WiFiClientSecure for HTTPS with proper timeout
@@ -1378,23 +1424,23 @@ void checkForUpdate() {
           // Retry logic for download
           int maxRetries = 3;
           for (int attempt = 0; attempt < maxRetries; attempt++) {
-            Serial.println("OTA download attempt " + String(attempt + 1) + "/" + String(maxRetries));
+            logLine("OTA download attempt " + String(attempt + 1) + "/" + String(maxRetries));
             
             t_httpUpdate_return ret = httpUpdate.update(client, downloadUrl);
 
             switch (ret) {
               case HTTP_UPDATE_FAILED:
-                Serial.println("Update attempt " + String(attempt + 1) + " failed: " + String(httpUpdate.getLastErrorString()));
+                logLine("Update attempt " + String(attempt + 1) + " failed: " + String(httpUpdate.getLastErrorString()));
                 if (attempt < maxRetries - 1) {
-                  Serial.println("Retrying in 5 seconds...");
+                  logLine("Retrying in 5 seconds...");
                   delay(5000);
                 }
                 break;
               case HTTP_UPDATE_NO_UPDATES:
-                Serial.println("No update needed");
+                logLine("No update needed");
                 return;
               case HTTP_UPDATE_OK:
-                Serial.println("Update successful, rebooting...");
+                logLine("Update successful, rebooting...");
                 // Mark version sync pending, ensure cross exists, then update DB before rebooting
                 preferences.putBool("version_sync_pending", true);
                 preferences.putString("version_sync_version", FIRMWARE_VERSION);
@@ -1411,19 +1457,19 @@ void checkForUpdate() {
             }
           }
         } else {
-          Serial.println("Could not find cross.bin in release assets");
+          logLine("Could not find cross.bin in release assets");
           http.end();
         }
       } else {
-        Serial.println("Already on latest version");
+        logLine("Already on latest version");
         http.end();
       }
     } else {
-      Serial.println("Failed to parse JSON response");
+      logLine("Failed to parse JSON response");
       http.end();
     }
   } else {
-    Serial.println("Failed to check version: " + String(httpCode));
+    logLine("Failed to check version: " + String(httpCode));
     http.end();
   }
 }
