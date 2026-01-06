@@ -100,6 +100,9 @@ String versionSyncVersion;
 unsigned long lastOTACheckMs = 0;
 const uint32_t OTA_CHECK_INTERVAL_MS = 86400000; // 24 hours in milliseconds
 
+// Email sync state
+bool emailUpdateFlag = false;  // Flag to force email pull from database on boot
+
 // In-memory log ring buffer exposed via /api/logs
 const size_t LOG_CAPACITY = 150;
 String logBuffer[LOG_CAPACITY];
@@ -164,6 +167,7 @@ bool fetchExistingCross();
 bool createCrossRecord();
 bool updateCrossVersionInNocoDB();
 bool updateCrossEmailInNocoDB();
+bool fetchEmailFromNocoDB();
 void attemptVersionSyncIfPending();
 bool verifyCrossIdExists();
 
@@ -243,6 +247,8 @@ void setup() {
   heartbeatCount = preferences.getLong("heartbeat_count", 0);
   versionSyncPending = preferences.getBool("version_sync_pending", false);
   versionSyncVersion = preferences.getString("version_sync_version", "");
+  emailUpdateFlag = preferences.getBool("email_update_flag", false);
+  logLine("[Boot] emailUpdateFlag=" + String(emailUpdateFlag ? "true" : "false"));
 
   if (!connectToSavedWiFi()) {
     startAPMode();
@@ -254,8 +260,27 @@ void setup() {
     attemptVersionSyncIfPending();
     // Ensure NocoDB reflects current firmware on boot
     updateCrossVersionInNocoDB();
-    // Sync email with NocoDB on boot
-    updateCrossEmailInNocoDB();
+    // Handle email sync: pull from DB if flag set, otherwise verify it exists
+    if (emailUpdateFlag) {
+      logLine("[Email] Email update flag set, pulling from database...");
+      if (fetchEmailFromNocoDB()) {
+        logLine("[Email] Email pulled from database successfully");
+        emailUpdateFlag = false;
+        preferences.putBool("email_update_flag", false);
+        updateCrossEmailInNocoDB();  // Sync it back
+      } else {
+        logLine("[Email] Failed to pull email from database");
+      }
+    } else {
+      logLine("[Email] Verifying stored email on boot...");
+      if (registeredEmail.length() == 0) {
+        logLine("[Email] No stored email found, clearing preferences");
+        preferences.putString("registered_email", "");
+      } else {
+        logLine("[Email] Email verified: " + registeredEmail);
+        updateCrossEmailInNocoDB();  // Sync stored email to DB
+      }
+    }
     // Check for OTA update on boot
     checkForUpdate();
   }
@@ -794,6 +819,60 @@ bool updateCrossEmailInNocoDB() {
   return success;
 }
 
+bool fetchEmailFromNocoDB() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (crossId.length() == 0 || crossId == "null") return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  logLine("[Email] Fetching email from NocoDB...");
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.GET();
+  if (code != 200) {
+    logLine("[Email] Fetch failed code=" + String(code));
+    http.end();
+    return false;
+  }
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) {
+    logLine("[Email] JSON parse error: " + String(err.c_str()));
+    return false;
+  }
+
+  JsonArray records = doc["list"];
+  if (records.isNull()) {
+    records = doc["data"].as<JsonArray>();
+  }
+
+  if (records.isNull() || records.size() == 0) {
+    logLine("[Email] No records found");
+    return false;
+  }
+
+  JsonObject rec = records[0];
+  String email = rec["registered_email"].as<String>();
+  if (email.length() == 0) {
+    logLine("[Email] No email field in record");
+    return false;
+  }
+
+  registeredEmail = email;
+  preferences.putString("registered_email", registeredEmail);
+  logLine("[Email] Email fetched and stored: " + registeredEmail);
+  return true;
+}
+
 bool createCrossRecord() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -1084,6 +1163,7 @@ void handleStatusAPI() {
   doc["mode"] = apModeActive ? "ap" : "station";
   doc["ip"] = apModeActive ? "192.168.4.1" : WiFi.localIP().toString();
   doc["wifi_saved"] = preferences.getString("wifi_ssid", "") != "";
+  doc["email"] = registeredEmail;
   doc["intercession_count"] = intercessionCount;
   doc["heartbeat_count"] = heartbeatCount;
 
@@ -1146,7 +1226,7 @@ void handleSerialCommand(const String &line) {
   op.toLowerCase();
 
   if (op == "help") {
-    Serial.println("Commands: help, setwifi <ssid> <password?>, resetwifi, setname <name>, settoken <token>");
+    Serial.println("Commands: help, setwifi <ssid> <password?>, resetwifi, setname <name>, settoken <token>, setemail");
     return;
   }
 
@@ -1208,6 +1288,15 @@ void handleSerialCommand(const String &line) {
     apiToken = tok;
     preferences.putString("api_token", apiToken);
     Serial.println("[SERIAL] Token updated");
+    return;
+  }
+
+  if (op == "setemail") {
+    emailUpdateFlag = true;
+    preferences.putBool("email_update_flag", true);
+    Serial.println("[SERIAL] Email update flag set, rebooting...");
+    delay(200);
+    ESP.restart();
     return;
   }
 
