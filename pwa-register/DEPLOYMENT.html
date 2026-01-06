@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CROSS PWA Deployment Guide</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+      color: #333;
+    }
+    h1, h2, h3 { color: #222; }
+    code {
+      background: #f0f0f0;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: 'Courier New', monospace;
+    }
+    pre {
+      background: #222;
+      color: #0f0;
+      padding: 15px;
+      border-radius: 5px;
+      overflow-x: auto;
+    }
+    .option {
+      border: 1px solid #ddd;
+      padding: 15px;
+      margin: 10px 0;
+      border-radius: 5px;
+      background: white;
+    }
+    .warning {
+      background: #ffe6e6;
+      border-left: 4px solid #ff4444;
+      padding: 12px;
+      margin: 10px 0;
+    }
+    .success {
+      background: #e6ffe6;
+      border-left: 4px solid #44ff44;
+      padding: 12px;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>🚀 CROSS PWA Registration - Deployment Guide</h1>
+
+  <h2>Quick Start Options</h2>
+
+  <div class="option">
+    <h3>Option 1: Local Testing (Easiest)</h3>
+    <p>Perfect for development and testing:</p>
+    <pre>cd pwa-register
+python -m http.server 8000</pre>
+    <p>Then visit: <code>http://localhost:8000</code></p>
+    <p class="success">✓ Works offline | ✓ No deployment needed</p>
+  </div>
+
+  <div class="option">
+    <h3>Option 2: Vercel (Recommended - 1 minute setup)</h3>
+    <p>Free, fast, and automatically updates from git:</p>
+    <ol>
+      <li>Sign up at <code>vercel.com</code></li>
+      <li>Connect your GitHub repo</li>
+      <li>Click "Deploy"</li>
+    </ol>
+    <p class="success">✓ Free | ✓ Auto-deploys | ✓ Global CDN</p>
+  </div>
+
+  <div class="option">
+    <h3>Option 3: Netlify (2 minute setup)</h3>
+    <ol>
+      <li>Go to <code>netlify.com</code></li>
+      <li>Drag & drop the <code>pwa-register</code> folder, or connect GitHub</li>
+      <li>Done!</li>
+    </ol>
+    <p class="success">✓ Free | ✓ Drag & drop deploy | ✓ HTTPS included</p>
+  </div>
+
+  <div class="option">
+    <h3>Option 4: GitHub Pages</h3>
+    <ol>
+      <li>Push to GitHub in folder <code>/docs</code> instead of <code>/pwa-register</code></li>
+      <li>Go to Settings → Pages → Source: Deploy from branch → /docs folder</li>
+      <li>Automatically published at <code>https://yourusername.github.io/CROSS</code></li>
+    </ol>
+    <p class="success">✓ Free | ✓ Part of your repo | ✓ HTTPS</p>
+  </div>
+
+  <div class="option">
+    <h3>Option 5: Azure Static Web Apps</h3>
+    <ol>
+      <li>Connect your GitHub repo in Azure Portal</li>
+      <li>Point to <code>pwa-register</code> folder</li>
+      <li>Auto-deploys on push</li>
+    </ol>
+    <p class="success">✓ Free tier included | ✓ Azure integration | ✓ CI/CD included</p>
+  </div>
+
+  <div class="option">
+    <h3>Option 6: Traditional Hosting (Bluehost, GoDaddy, etc)</h3>
+    <ol>
+      <li>Upload <code>pwa-register</code> folder contents via FTP/SFTP</li>
+      <li>Or use control panel file manager</li>
+    </ol>
+    <p>Use if you already have web hosting</p>
+  </div>
+
+  <h2>Configuration Before Deployment</h2>
+
+  <div class="warning">
+    <strong>⚠️ Important:</strong> Update these values in <code>app.js</code> BEFORE deploying:
+  </div>
+
+  <pre>// In pwa-register/app.js, lines 6-13:
+
+const CONFIG = {
+  NOCODB_URL: 'https://noco.app.p7n.net',  // ← Your NocoDB instance
+  API_TOKEN: 'fDhJb1s9aK8yQsj99iSt6DOe9o518yGAwAdwezn1',  // ← Your token
+  
+  USERS_TABLE: 'mtsl8eo5bfxhg8h',      // ← Update with YOUR table IDs
+  CROSSES_TABLE: 'mdk4garchpkpvsd',
+  PRAYERS_TABLE: 'mt7iucs253e26u0',
+};</pre>
+
+  <h3>How to find your NocoDB table IDs:</h3>
+  <ol>
+    <li>Open NocoDB and go to your base</li>
+    <li>Click on a table (e.g., "users")</li>
+    <li>Look at the URL: <code>noco.app.p7n.net?base=<strong>BASE_ID</strong>&nc=<strong>TABLE_ID</strong></code></li>
+    <li>Copy the TABLE_ID and update your CONFIG</li>
+  </ol>
+
+  <h2>Mobile Installation</h2>
+
+  <h3>iPhone/iPad (Safari)</h3>
+  <ol>
+    <li>Open the PWA in Safari</li>
+    <li>Tap the Share button</li>
+    <li>Tap "Add to Home Screen"</li>
+    <li>Done! App appears on home screen</li>
+  </ol>
+
+  <h3>Android (Chrome)</h3>
+  <ol>
+    <li>Open the PWA in Chrome</li>
+    <li>Tap menu (⋮) → "Install app"</li>
+    <li>Or look for "Install" button that appears automatically</li>
+  </ol>
+
+  <h3>Desktop (Windows/Mac)</h3>
+  <ol>
+    <li>Open in Chrome/Edge</li>
+    <li>Click install icon in address bar</li>
+    <li>App opens in a window (like a native app)</li>
+  </ol>
+
+  <h2>Post-Deployment Checklist</h2>
+
+  <ul>
+    <li>☐ Test login/signup works</li>
+    <li>☐ Test registering a cross</li>
+    <li>☐ Test submitting a prayer</li>
+    <li>☐ Test installing PWA on phone</li>
+    <li>☐ Test offline mode (DevTools → Network → Offline)</li>
+    <li>☐ Verify HTTPS is enabled</li>
+    <li>☐ Check browser console for errors</li>
+    <li>☐ Share URL with users</li>
+  </ul>
+
+  <h2>Sharing Instructions for Users</h2>
+
+  <p>You can share this simple message with users:</p>
+
+  <div class="option">
+    <p><strong>📱 Register Your Cross</strong></p>
+    <p>Visit: <code>https://your-pwa-url.com</code></p>
+    <p>1. Create an account or sign in</p>
+    <p>2. Register your CROSS device</p>
+    <p>3. Submit prayers for intercession</p>
+    <p>💡 Pro tip: Add to your home screen for quick access!</p>
+  </div>
+
+  <h2>Troubleshooting</h2>
+
+  <h3>Problem: "API Token not working"</h3>
+  <ul>
+    <li>Check token is copied exactly (no extra spaces)</li>
+    <li>Verify NocoDB is accessible from your deployment domain</li>
+    <li>Check browser DevTools → Network tab for actual error</li>
+  </ul>
+
+  <h3>Problem: "CORS error"</h3>
+  <ul>
+    <li>Add your PWA URL to NocoDB's allowed origins</li>
+    <li>Or set up a backend proxy</li>
+  </ul>
+
+  <h3>Problem: "Users table not found"</h3>
+  <ul>
+    <li>Verify table ID is correct in CONFIG</li>
+    <li>Make sure table exists in NocoDB</li>
+    <li>Check API token has access to the table</li>
+  </ul>
+
+  <h2>Next Steps</h2>
+
+  <ol>
+    <li>Update CONFIG in app.js with your NocoDB details</li>
+    <li>Choose a deployment option above</li>
+    <li>Deploy!</li>
+    <li>Share the URL with your community</li>
+    <li>Start registering crosses and receiving prayers</li>
+  </ol>
+
+  <div class="success">
+    <strong>🎉 You're ready to deploy!</strong><br>
+    The PWA works great with your existing CROSS firmware and NocoDB instance.
+  </div>
+
+</body>
+</html>

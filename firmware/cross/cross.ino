@@ -22,7 +22,7 @@
 #include <FastLED.h>
 #endif
 
-const char* FIRMWARE_VERSION = "3.5";
+const char* FIRMWARE_VERSION = "3.6";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // LED Strip Configuration
@@ -80,6 +80,9 @@ bool apModeActive = false;
 bool serverStarted = false;
 bool isConnected = false;
 
+// Serial command buffer for local maintenance commands
+String serialBuffer;
+
 String crossId;
 String apiToken;  // Optional API authentication token
 
@@ -134,6 +137,7 @@ bool connectToSavedWiFi();
 void startAPMode();
 void loadDeviceConfig();
 String computeDeviceKey();
+String macSuffix();
 void handlePortal();
 void handlePortalSave();
 void handleStatusAPI();
@@ -152,6 +156,8 @@ void runPrayerPulse();
 void runAPModePulse();
 void pollPrayersIfDue();
 void pollPrayers();
+void processSerialInput();
+void handleSerialCommand(const String &line);
 void registerCrossIfNeeded();
 bool fetchExistingCross();
 bool createCrossRecord();
@@ -269,6 +275,7 @@ void loop() {
     pollPrayersIfDue();
     checkForOTAUpdateIfDue();
   }
+  processSerialInput();
   delay(1);
 }
 
@@ -306,12 +313,8 @@ void loadDeviceConfig() {
   if (DEVICE_NAME == "") {
     randomSeed(ESP.getEfuseMac());
     String name = String(BIBLICAL_NAMES[random(BIBLICAL_NAMES_COUNT)]);
-    String chars = "";
-    const char* charset = "abcdefghijklmnopqrstuvwxyz0123456789";
-    for (int i = 0; i < 3; i++) {
-      chars += charset[random(36)];
-    }
-    DEVICE_NAME = name + chars;
+    // Always include MAC suffix so hostnames stay unique across units
+    DEVICE_NAME = name + "-" + macSuffix();
     preferences.putString("device_name", DEVICE_NAME);
   }
 
@@ -332,6 +335,14 @@ String computeDeviceKey() {
   uint64_t mac = ESP.getEfuseMac();
   char buf[17];
   snprintf(buf, sizeof(buf), "%012llX", (unsigned long long)mac);
+  return String(buf);
+}
+
+String macSuffix() {
+  uint64_t mac = ESP.getEfuseMac();
+  uint32_t suffix = (uint32_t)((mac >> 24) & 0xFFFFFF); // first 3 bytes (OUI)
+  char buf[7];
+  snprintf(buf, sizeof(buf), "%06X", (unsigned long)suffix);
   return String(buf);
 }
 
@@ -1038,6 +1049,115 @@ void handleLogsAPI() {
   String dump = buildLogDump();
   server.sendHeader("Content-Type", "text/plain");
   server.send(200, "text/plain", dump);
+}
+
+// ============================================================================
+// SERIAL MAINTENANCE COMMANDS
+// ============================================================================
+
+void processSerialInput() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialBuffer.length() > 0) {
+        handleSerialCommand(serialBuffer);
+        serialBuffer = "";
+      }
+    } else {
+      if (serialBuffer.length() < 200) {
+        serialBuffer += c;
+      }
+    }
+  }
+}
+
+void handleSerialCommand(const String &line) {
+  String cmd = line;
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  // Tokenize
+  std::vector<String> parts;
+  int start = 0;
+  while (start < cmd.length()) {
+    int space = cmd.indexOf(' ', start);
+    if (space == -1) space = cmd.length();
+    parts.push_back(cmd.substring(start, space));
+    start = space + 1;
+    while (start < cmd.length() && cmd[start] == ' ') start++;
+  }
+
+  if (parts.size() == 0) return;
+  String op = parts[0];
+  op.toLowerCase();
+
+  if (op == "help") {
+    Serial.println("Commands: help, setwifi <ssid> <password?>, resetwifi, setname <name>, settoken <token>");
+    return;
+  }
+
+  if (op == "setwifi") {
+    if (parts.size() < 2) {
+      Serial.println("Usage: setwifi <ssid> <password?>");
+      return;
+    }
+    String ssid = parts[1];
+    String pwd = parts.size() >= 3 ? parts[2] : "";
+    preferences.putString("wifi_ssid", ssid);
+    preferences.putString("wifi_password", pwd);
+    Serial.println("[SERIAL] WiFi saved, rebooting...");
+    delay(200);
+    ESP.restart();
+    return;
+  }
+
+  if (op == "resetwifi") {
+    preferences.putString("wifi_ssid", "");
+    preferences.putString("wifi_password", "");
+    Serial.println("[SERIAL] WiFi cleared, rebooting...");
+    delay(200);
+    ESP.restart();
+    return;
+  }
+
+  if (op == "setname") {
+    if (parts.size() < 2) {
+      Serial.println("Usage: setname <device_name>");
+      return;
+    }
+    String newName = parts[1];
+    if (newName.length() > 32 || newName.length() == 0) {
+      Serial.println("[SERIAL] Name must be 1-32 chars");
+      return;
+    }
+    DEVICE_NAME = newName;
+    preferences.putString("device_name", DEVICE_NAME);
+    HOSTNAME = DEVICE_NAME + ".cross";
+    MDNS_HOSTNAME = DEVICE_NAME + ".local";
+    AP_SSID = DEVICE_NAME;
+    Serial.println("[SERIAL] Name set; rebooting to apply");
+    delay(200);
+    ESP.restart();
+    return;
+  }
+
+  if (op == "settoken") {
+    if (parts.size() < 2) {
+      Serial.println("Usage: settoken <token|empty>");
+      return;
+    }
+    String tok = parts[1];
+    if (tok.length() > 128) {
+      Serial.println("[SERIAL] Token too long (max 128)");
+      return;
+    }
+    apiToken = tok;
+    preferences.putString("api_token", apiToken);
+    Serial.println("[SERIAL] Token updated");
+    return;
+  }
+
+  Serial.println("Unknown cmd; try 'help'");
 }
 
 void handleScanWiFiAPI() {
