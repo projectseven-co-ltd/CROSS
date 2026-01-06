@@ -163,6 +163,7 @@ void registerCrossIfNeeded();
 bool fetchExistingCross();
 bool createCrossRecord();
 bool updateCrossVersionInNocoDB();
+bool updateCrossEmailInNocoDB();
 void attemptVersionSyncIfPending();
 bool verifyCrossIdExists();
 
@@ -253,6 +254,8 @@ void setup() {
     attemptVersionSyncIfPending();
     // Ensure NocoDB reflects current firmware on boot
     updateCrossVersionInNocoDB();
+    // Sync email with NocoDB on boot
+    updateCrossEmailInNocoDB();
     // Check for OTA update on boot
     checkForUpdate();
   }
@@ -750,6 +753,45 @@ void updateCrossHeartbeat() {
     logLine("[NocoDB] Heartbeat update failed code=" + String(code));
   }
   http.end();
+}
+
+bool updateCrossEmailInNocoDB() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (crossId.length() == 0 || crossId == "null") return false;
+  if (registeredEmail.length() == 0) return false;
+
+  String url = String(NOCODB_BASE_URL) + String(NOCODB_CROSSES_PATH) + "?where=(Id,eq," + crossId + ")";
+
+  StaticJsonDocument<256> doc;
+  doc["Id"] = crossId;
+  doc["registered_email"] = registeredEmail;
+
+  String payload;
+  serializeJson(doc, payload);
+  logLine("[NocoDB] Update email payload: " + payload);
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  if (String(NOCODB_API_TOKEN).length() > 0) {
+    http.addHeader("xc-token", NOCODB_API_TOKEN);
+  }
+
+  int code = http.PATCH(payload);
+  logLine("[NocoDB] Update email response code: " + String(code));
+
+  bool success = (code >= 200 && code < 300);
+  if (!success) {
+    logLine("[NocoDB] Email update failed code=" + String(code));
+    String response = http.getString();
+    logLine("[NocoDB] Error: " + response);
+  } else {
+    logLine("[NocoDB] Email synced successfully");
+  }
+  http.end();
+  return success;
 }
 
 bool createCrossRecord() {
