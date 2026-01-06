@@ -260,27 +260,31 @@ void setup() {
     attemptVersionSyncIfPending();
     // Ensure NocoDB reflects current firmware on boot
     updateCrossVersionInNocoDB();
-    // Handle email sync: pull from DB if flag set, otherwise verify it exists
+    
+    // ALWAYS sync email to NocoDB if we have one stored, regardless of registration state
+    if (registeredEmail.length() > 0) {
+      logLine("[Email] Syncing email to NocoDB: " + registeredEmail);
+      updateCrossEmailInNocoDB();
+    } else {
+      logLine("[Email] No email stored locally");
+    }
+    
+    // Handle email update flag if set (pull from DB)
     if (emailUpdateFlag) {
       logLine("[Email] Email update flag set, pulling from database...");
       if (fetchEmailFromNocoDB()) {
         logLine("[Email] Email pulled from database successfully");
         emailUpdateFlag = false;
         preferences.putBool("email_update_flag", false);
-        updateCrossEmailInNocoDB();  // Sync it back
+        // Sync the pulled email back to ensure consistency
+        if (registeredEmail.length() > 0) {
+          updateCrossEmailInNocoDB();
+        }
       } else {
         logLine("[Email] Failed to pull email from database");
       }
-    } else {
-      logLine("[Email] Verifying stored email on boot...");
-      if (registeredEmail.length() == 0) {
-        logLine("[Email] No stored email found, clearing preferences");
-        preferences.putString("registered_email", "");
-      } else {
-        logLine("[Email] Email verified: " + registeredEmail);
-        updateCrossEmailInNocoDB();  // Sync stored email to DB
-      }
     }
+    
     // Check for OTA update on boot
     checkForUpdate();
   }
@@ -548,6 +552,11 @@ void registerCrossIfNeeded() {
   if (crossId.length() > 0 && crossId != "null") {
     if (verifyCrossIdExists()) {
       logLine("[NocoDB] Cross already registered id=" + crossId);
+      // Sync email if we have one stored locally
+      if (registeredEmail.length() > 0) {
+        logLine("[NocoDB] Syncing email for existing cross");
+        updateCrossEmailInNocoDB();
+      }
       return;
     }
     // Existing id not found on server; clear and re-register
@@ -563,10 +572,21 @@ void registerCrossIfNeeded() {
   }
 
   if (fetchExistingCross()) {
+    // After fetching existing cross, sync email if we have one locally that differs
+    if (registeredEmail.length() > 0) {
+      logLine("[NocoDB] Syncing email after fetching existing cross");
+      updateCrossEmailInNocoDB();
+    }
     return;
   }
 
-  createCrossRecord();
+  if (createCrossRecord()) {
+    // After creating new cross, sync email if we have one locally
+    if (registeredEmail.length() > 0) {
+      logLine("[NocoDB] Syncing email after creating new cross");
+      updateCrossEmailInNocoDB();
+    }
+  }
 }
 
 bool fetchExistingCross() {
@@ -885,8 +905,13 @@ bool createCrossRecord() {
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["status"] = "active";
   doc["intercession_count"] = intercessionCount;
+  
+  // ALWAYS include email if we have one stored, regardless of when it was set
   if (registeredEmail.length() > 0) {
     doc["registered_email"] = registeredEmail;
+    logLine("[NocoDB] Including email in cross creation: " + registeredEmail);
+  } else {
+    logLine("[NocoDB] No email available during cross creation");
   }
 
   String payload;
