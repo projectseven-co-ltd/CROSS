@@ -85,6 +85,7 @@ String serialBuffer;
 
 String crossId;
 String apiToken;  // Optional API authentication token
+String registeredEmail;  // User's email for cross registration
 
 // NocoDB poll state
 unsigned long lastNocoPollMs = 0;
@@ -233,6 +234,7 @@ void setup() {
 
   crossId = preferences.getString("cross_id", "");
   apiToken = preferences.getString("api_token", "");
+  registeredEmail = preferences.getString("registered_email", "");
   // restore last seen prayer timestamp
   lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
   lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
@@ -625,6 +627,13 @@ bool fetchExistingCross() {
     intercessionCount = rec["intercession_count"].as<long>();
     preferences.putLong("intercession_count", intercessionCount);
   }
+  if (!rec["registered_email"].isNull()) {
+    String email = rec["registered_email"].as<String>();
+    if (email.length() > 0) {
+      registeredEmail = email;
+      preferences.putString("registered_email", registeredEmail);
+    }
+  }
   logLine("[NocoDB] Cross found id=" + crossId);
   return true;
 }
@@ -755,6 +764,9 @@ bool createCrossRecord() {
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["status"] = "active";
   doc["intercession_count"] = intercessionCount;
+  if (registeredEmail.length() > 0) {
+    doc["registered_email"] = registeredEmail;
+  }
 
   String payload;
   serializeJson(doc, payload);
@@ -1222,6 +1234,8 @@ void handlePortal() {
   }
   page += "</select>";
   page += "<label>Password</label><input name='password' type='password' placeholder='optional if open'>";
+  page += "<label>Email (Required)</label><input name='email' type='email' required placeholder='your@email.com'>";
+  page += "<p style='font-size:11px;color:#888;margin:8px 0;'>Your email registers this cross to your account. All crosses you set up will be linked together. \"If anyone would come after me, let him deny himself and take up his cross and follow me.\" - Matthew 16:24</p>";
   page += "<button type='submit'>Save & Restart</button>";
   page += "</form><p style='margin-top:12px;font-size:12px;color:#aaa;'>Device: " + DEVICE_NAME + "</p>";
   page += "</div></body></html>";
@@ -1233,14 +1247,22 @@ void handlePortal() {
 void handlePortalSave() {
   String ssid = server.arg("ssid");
   String password = server.arg("password");
+  String email = server.arg("email");
 
   if (ssid.length() == 0) {
     server.send(400, "text/plain", "SSID required");
     return;
   }
 
+  if (email.length() == 0) {
+    server.send(400, "text/plain", "Email required");
+    return;
+  }
+
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
+  preferences.putString("registered_email", email);
+  registeredEmail = email;
 
   String msg = "<html><body><h2>Saved.</h2><p>Rebooting...</p></body></html>";
   server.sendHeader("Content-Type", "text/html");
