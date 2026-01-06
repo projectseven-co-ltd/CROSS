@@ -1,0 +1,12 @@
+{
+  "buildCommand": "# nothing to build",
+  "outputDirectory": ".",
+  "env": {},
+  "public": true,
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
