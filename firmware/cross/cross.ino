@@ -22,7 +22,7 @@
 #include <FastLED.h>
 #endif
 
-const char* FIRMWARE_VERSION = "3.6";
+const char* FIRMWARE_VERSION = "3.7";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // LED Strip Configuration
@@ -150,6 +150,8 @@ void handleConfigureWiFiAPI();
 void handleWiFiReset();
 void handleSetName();
 void handleSetToken();
+void handleSetEmail();
+void handleReboot();
 void handleLogsAPI();
 void handleOTAUpdate();
 bool isAuthorized();
@@ -239,7 +241,8 @@ void setup() {
 
   crossId = preferences.getString("cross_id", "");
   apiToken = preferences.getString("api_token", "");
-  registeredEmail = preferences.getString("registered_email", "");
+  registeredEmail = preferences.getString("reg_email", "");
+  logLine("[Boot] reg_email='" + registeredEmail + "'");
   // restore last seen prayer timestamp
   lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
   lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
@@ -679,7 +682,7 @@ bool fetchExistingCross() {
     String email = rec["registered_email"].as<String>();
     if (email.length() > 0) {
       registeredEmail = email;
-      preferences.putString("registered_email", registeredEmail);
+      preferences.putString("reg_email", registeredEmail);
     }
   }
   logLine("[NocoDB] Cross found id=" + crossId);
@@ -888,7 +891,7 @@ bool fetchEmailFromNocoDB() {
   }
 
   registeredEmail = email;
-  preferences.putString("registered_email", registeredEmail);
+  preferences.putString("reg_email", registeredEmail);
   logLine("[Email] Email fetched and stored: " + registeredEmail);
   return true;
 }
@@ -1417,8 +1420,17 @@ void handlePortalSave() {
 
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
-  preferences.putString("registered_email", email);
+  preferences.putString("reg_email", email);
   registeredEmail = email;
+  // Verify persistence
+  {
+    String verify = preferences.getString("reg_email", "");
+    if (verify != registeredEmail) {
+      logLine("[Portal] Warning: reg_email verification failed, stored='" + verify + "'");
+    } else {
+      logLine("[Portal] reg_email persisted");
+    }
+  }
 
   String msg = "<html><body><h2>Saved.</h2><p>Rebooting...</p></body></html>";
   server.sendHeader("Content-Type", "text/html");
@@ -1443,6 +1455,7 @@ void handleConfigureWiFiAPI() {
 
   String ssid = doc["ssid"] | "";
   String password = doc["password"] | "";
+  String email = doc["email"] | ""; // optional email field supported for API provisioning
 
   if (ssid == "") {
     server.send(400, "application/json", "{\"error\": \"SSID required\"}");
@@ -1452,6 +1465,22 @@ void handleConfigureWiFiAPI() {
   logLine("store wifi ssid=" + ssid);
   preferences.putString("wifi_ssid", ssid);
   preferences.putString("wifi_password", password);
+
+  // If the caller supplied an email, store it exactly like the captive portal does
+  if (email.length() > 0) {
+    logLine("[WiFi] Storing registered email from API: " + email);
+    preferences.putString("reg_email", email);
+    registeredEmail = email;
+    // Verify persistence
+    {
+      String verify = preferences.getString("reg_email", "");
+      if (verify != registeredEmail) {
+        logLine("[WiFi] Warning: reg_email verification failed, stored='" + verify + "'");
+      } else {
+        logLine("[WiFi] reg_email persisted");
+      }
+    }
+  }
 
   DynamicJsonDocument response(128);
   response["status"] = "configured";
@@ -1532,6 +1561,87 @@ void handleSetToken() {
   
   server.sendHeader("Content-Type", "application/json");
   server.send(200, "application/json", responseStr);
+}
+
+void handleSetEmail() {
+  // No authorization required for local network usage
+  String email = "";
+
+  // Prefer JSON body when provided
+  if (server.hasArg("plain") && server.arg("plain").length() > 0) {
+    DynamicJsonDocument doc(256);
+    DeserializationError err = deserializeJson(doc, server.arg("plain"));
+    if (!err) {
+      email = doc["email"] | "";
+    } else {
+      logLine("[API] Invalid JSON in /api/set-email: " + String(err.c_str()));
+    }
+  }
+
+  // Fallback to form-encoded body (e.g., email=...)
+  if (email.length() == 0 && server.hasArg("email")) {
+    email = server.arg("email");
+  }
+
+  if (email == "" || email.length() > 128) {
+    server.send(400, "application/json", "{\"error\": \"email required (max 128 chars)\"}");
+    return;
+  }
+
+  logLine("[API] Setting registered email to: " + email);
+  registeredEmail = email;
+
+  // Write + diagnostics: check return bytes and do an explicit NVS reopen to force commit
+  size_t written = preferences.putString("reg_email", registeredEmail);
+  logLine("[API] preferences.putString wrote bytes=" + String(written));
+
+  String verify = preferences.getString("reg_email", "");
+  logLine("[API] verify immediately after putString='" + verify + "'");
+
+  // Re-open preferences namespace to ensure commit is visible across opens
+  preferences.end();
+  delay(20);
+  preferences.begin("cross", false);
+  String verify2 = preferences.getString("reg_email", "");
+  logLine("[API] verify after preferences.end()/begin()='" + verify2 + "'");
+
+  if (verify2 != registeredEmail) {
+    logLine("[API] Warning: reg_email verification failed after reopen, stored='" + verify2 + "'");
+  } else {
+    logLine("[API] reg_email persisted after reopen");
+  }
+
+  bool synced = false;
+  if (WiFi.status() == WL_CONNECTED && crossId.length() > 0 && crossId != "null") {
+    if (updateCrossEmailInNocoDB()) {
+      synced = true;
+    } else {
+      logLine("[API] Email stored but NocoDB sync failed");
+    }
+  }
+
+  DynamicJsonDocument response(128);
+  response["status"] = "success";
+  response["email"] = registeredEmail;
+  response["synced"] = synced;
+
+  String responseStr;
+  serializeJson(response, responseStr);
+
+  server.sendHeader("Content-Type", "application/json");
+  server.send(200, "application/json", responseStr);
+}
+
+void handleReboot() {
+  logLine("[API] Reboot requested via /api/reboot");
+  DynamicJsonDocument response(128);
+  response["status"] = "rebooting";
+  String responseStr;
+  serializeJson(response, responseStr);
+  server.sendHeader("Content-Type", "application/json");
+  server.send(200, "application/json", responseStr);
+  delay(250);
+  ESP.restart();
 }
 
 void handleSetName() {
@@ -1641,6 +1751,8 @@ void startHttpServer(bool inAPMode) {
   server.on("/api/reset-wifi", HTTP_POST, handleWiFiReset);
   server.on("/api/set-name", HTTP_POST, handleSetName);
   server.on("/api/set-token", HTTP_POST, handleSetToken);
+  server.on("/api/set-email", HTTP_POST, handleSetEmail);
+  server.on("/api/reboot", HTTP_POST, handleReboot);
   server.on("/api/logs", HTTP_GET, handleLogsAPI);
   server.on("/api/update", HTTP_POST, handleOTAUpdate);
 

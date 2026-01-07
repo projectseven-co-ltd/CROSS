@@ -34,6 +34,69 @@ For physical crosses - see [pwa-register/QR_GENERATION.md](pwa-register/QR_GENER
 - 📲 [QR Codes](pwa-register/QR_GENERATION.md) - Generate QR for crosses
 - 📋 [Quick Reference](pwa-register/QUICK_REFERENCE.md) - Cheat sheet
 
+## 🔌 Device HTTP API (Quick Reference)
+
+- **GET /api/status** — device status (name, version, ip, saved wifi, email)
+- **POST /api/configure-wifi** — configure WiFi via JSON body {"ssid":"...","password":"...","email":"optional@domain"}
+- **POST /api/set-email** — set or update registered email for the device and attempt immediate sync to NocoDB
+
+Examples:
+
+- Set email via JSON (use curl.exe on PowerShell to avoid quoting issues):
+
+```bash
+curl.exe -X POST http://<device-host>/api/set-email -H "Content-Type: application/json" --data-raw '{"email":"you@example.com"}'
+```
+
+- Set email via form-encoded body (simple curl):
+
+```bash
+curl -X POST http://<device-host>/api/set-email -d "email=you@example.com"
+```
+
+- Configure WiFi + email via API:
+
+```bash
+curl.exe -X POST http://<device-host>/api/configure-wifi -H "Content-Type: application/json" --data-raw '{"ssid":"MyNet","password":"pass","email":"you@example.com"}'
+```
+
+Note: `/api/set-email` does **not** require an API token and is intended for local network use. If you want stricter control over device APIs, configure an API token via `/api/set-token` and enforce it in your workflows.
+
+**Preference storage key**: the firmware stores the email in NVS under the key `reg_email` (short key chosen to avoid NVS key-length issues on some ESP32 devices). The device reads `reg_email` on boot and will sync it to NocoDB automatically.
+
+If you are migrating from older firmware that used `registered_email`, it will still read from NocoDB on registration and re-populate `reg_email` when it pulls the record on boot.
+
+## 🧪 Testing the API
+
+Two small scripts are included to exercise `/api/set-email` and verify `/api/status`:
+
+- `scripts/test_set_email.sh` (bash)
+- `scripts/test_set_email.ps1` (PowerShell)
+
+Examples:
+
+- Test without auth:
+
+```bash
+./scripts/test_set_email.sh http://jacob-f4e9d4.local you@example.com
+```
+
+- Test with auth (set token first):
+
+```bash
+# Set token (use curl.exe on PowerShell if needed)
+curl.exe -X POST http://<device-host>/api/set-token -H "Content-Type: application/json" --data-raw '{"token":"s3cr3t"}'
+
+# Run test helper (bash)
+./scripts/test_set_email.sh http://<device-host> s3cr3t you@example.com
+
+# Or PowerShell
+.
+\scripts\test_set_email.ps1 -Device 'http://<device-host>' -Token 's3cr3t' -Email 'you@example.com'
+```
+
+The scripts will print the response and the `/api/status` payload to help confirm success.
+
 ## 🎯 Features
 
 - User registration and account management
