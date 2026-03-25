@@ -22,7 +22,7 @@
 #include <FastLED.h>
 #endif
 
-const char* FIRMWARE_VERSION = "3.7";
+const char* FIRMWARE_VERSION = "4.0";
 const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/CROSS-firmware/releases/latest";
 
 // LED Strip Configuration
@@ -47,12 +47,14 @@ const char* GITHUB_API_URL = "https://api.github.com/repos/projectseven-co-ltd/C
   CRGB leds[NUM_LEDS];
 #endif
 
-// NocoDB polling (set to your API and table/view endpoint)
-const char* NOCODB_BASE_URL = "https://noco.app.p7n.net"; // e.g., https://nocodb.example.com
-const char* NOCODB_PRAYERS_PATH = "/api/v2/tables/mt7iucs253e26u0/records"; // adjust if using a view
-const char* NOCODB_CROSSES_PATH = "/api/v2/tables/mdk4garchpkpvsd/records";
-const char* NOCODB_API_TOKEN = "fDhJb1s9aK8yQsj99iSt6DOe9o518yGAwAdwezn1"; // xc-token header
-const uint32_t NOCODB_POLL_MS = 60000; // poll every 60s
+// SchedKit Alerts API — cross polls this instead of NocoDB prayers
+const char* SCHEDKIT_BASE_URL  = "https://schedkit.net";
+const char* SCHEDKIT_API_KEY   = "p7s_pJSiN-U9RxUQtxYauUFYOHuj7f6UwLJE"; // x-api-key
+const char* NOCODB_BASE_URL    = "https://noco.app.p7n.net";
+
+const char* NOCODB_CROSSES_PATH = "/api/v1/db/data/noco/pdrfbzgtno2cf9l/mqbvkiidtv2xl99";
+const char* NOCODB_API_TOKEN = "fDhJb1s9aK8yQsj99iSt6DOe9o518yGAwAdwezn1";
+const uint32_t ALERT_POLL_MS  = 30000; // poll alerts every 30s
 
 const char* BIBLICAL_NAMES[] = {
   "luke", "john", "mark", "matthew", "paul", "peter", "james", "timothy",
@@ -88,9 +90,9 @@ String apiToken;  // Optional API authentication token
 String registeredEmail;  // User's email for cross registration
 
 // NocoDB poll state
-unsigned long lastNocoPollMs = 0;
-String lastPrayerSeenTs;
-long lastPrayerSeenId = 0;
+unsigned long lastAlertPollMs = 0;
+
+
 long intercessionCount = 0;
 long heartbeatCount = 0;  // Activity level counter (increments on each heartbeat)
 bool versionSyncPending = false; // Tracks if firmware version needs DB sync
@@ -160,8 +162,8 @@ void startHttpServer(bool inAPMode);
 void startmDNS();
 void runPrayerPulse();
 void runAPModePulse();
-void pollPrayersIfDue();
-void pollPrayers();
+void pollAlertsIfDue();
+void pollAlerts();
 void processSerialInput();
 void handleSerialCommand(const String &line);
 void registerCrossIfNeeded();
@@ -244,8 +246,8 @@ void setup() {
   registeredEmail = preferences.getString("reg_email", "");
   logLine("[Boot] reg_email='" + registeredEmail + "'");
   // restore last seen prayer timestamp
-  lastPrayerSeenTs = preferences.getString("last_prayer_ts", "");
-  lastPrayerSeenId = preferences.getLong("last_prayer_id", 0);
+  
+  
   intercessionCount = preferences.getLong("intercession_count", 0);
   heartbeatCount = preferences.getLong("heartbeat_count", 0);
   versionSyncPending = preferences.getBool("version_sync_pending", false);
@@ -309,7 +311,7 @@ void loop() {
     server.handleClient();
   }
   if (!apModeActive && isConnected) {
-    pollPrayersIfDue();
+    pollAlertsIfDue();
     checkForOTAUpdateIfDue();
   }
   processSerialInput();
@@ -1064,11 +1066,11 @@ bool isCrossActive() {
   return isActive;
 }
 
-void pollPrayersIfDue() {
+void pollAlertsIfDue() {
   unsigned long now = millis();
-  if (now - lastNocoPollMs < NOCODB_POLL_MS) return;
-  lastNocoPollMs = now;
-  pollPrayers();
+  if (now - lastAlertPollMs < ALERT_POLL_MS) return;
+  lastAlertPollMs = now;
+  pollAlerts();
 }
 
 void checkForOTAUpdateIfDue() {
@@ -1078,105 +1080,91 @@ void checkForOTAUpdateIfDue() {
   checkForUpdate();
 }
 
-void pollPrayers() {
+void pollAlerts() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (crossId.length() == 0 || crossId == "null") return;
 
-  // Check if this cross is active before processing prayers
+  // Check if this cross is active
   if (!isCrossActive()) {
-    logLine("[NocoDB] Cross not active, skipping prayers");
+    logLine("[CROSS] Not active, skipping alert poll");
     return;
   }
 
   // Update heartbeat
   updateCrossHeartbeat();
 
-  String url = String(NOCODB_BASE_URL) + String(NOCODB_PRAYERS_PATH);
-  // Filter by incremental Id to avoid date-format issues
-  if (lastPrayerSeenId > 0) {
-    url += "?where=(Id,gt," + String(lastPrayerSeenId) + ")&limit=20&sort=Id&order=asc";
-  } else {
-    url += "?limit=5&sort=Id&order=desc";
-  }
+  // Fetch firing alerts from SchedKit
+  String url = String(SCHEDKIT_BASE_URL) + "/v1/alerts?status=firing&limit=20";
 
   HTTPClient http;
   WiFiClientSecure client;
-  client.setInsecure(); // TODO: add root CA for production
+  client.setInsecure();
   http.begin(client, url);
-  if (String(NOCODB_API_TOKEN).length() > 0) {
-    http.addHeader("xc-token", NOCODB_API_TOKEN);
-  }
+  http.addHeader("x-api-key", SCHEDKIT_API_KEY);
+
   int code = http.GET();
   if (code != 200) {
-    logLine("[NocoDB] GET failed code=" + String(code));
-    String resp = http.getString();
-    logLine("[NocoDB] GET body: " + resp);
+    logLine("[SchedKit] Alert poll failed code=" + String(code));
     http.end();
     return;
   }
 
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, http.getStream());
-  if (err) {
-    logLine("[NocoDB] JSON parse error");
-    http.end();
-    return;
-  }
   http.end();
 
-  JsonArray records = doc["list"];
-  if (records.isNull()) {
-    // Some NocoDB responses might use "data"; try fallback
-    records = doc["data"].as<JsonArray>();
-  }
-
-  if (records.isNull() || records.size() == 0) {
-    logLine("[NocoDB] No new prayers");
+  if (err) {
+    logLine("[SchedKit] JSON parse error: " + String(err.c_str()));
     return;
   }
 
-  logLine("[NocoDB] Prayers fetched count=" + String(records.size()));
-  String newestTs = lastPrayerSeenTs;
-  long newestId = lastPrayerSeenId;
-  int newPrayerCount = 0;
-
-  for (JsonObject rec : records) {
-    long recId = rec["Id"] | 0;
-    if (recId > 0 && recId > lastPrayerSeenId) {
-      newPrayerCount++;
-      // Trigger LED pulse for each new prayer
-      runPrayerPulse();
-      if (newPrayerCount < records.size()) {
-        delay(2000); // 2 second delay between prayer pulses
-      }
-    }
-    if (recId > 0 && recId > newestId) {
-      newestId = recId;
-    }
-    String created = rec["CreatedAt"] | "";
-    if (created.length() > 0) {
-      if (newestTs.length() == 0 || created > newestTs) {
-        newestTs = created;
-      }
-    }
+  JsonArray alerts = doc["alerts"];
+  if (alerts.isNull() || alerts.size() == 0) {
+    logLine("[SchedKit] No firing alerts");
+    return;
   }
 
-  if (newPrayerCount > 0) {
-    logLine("[NocoDB] New prayers: " + String(newPrayerCount));
-    intercessionCount += newPrayerCount;
+  logLine("[SchedKit] Firing alerts: " + String(alerts.size()));
+
+  int pulsed = 0;
+  for (JsonObject alert : alerts) {
+    long alertId = alert["Id"] | 0;
+    String title = alert["title"] | "alert";
+    String severity = alert["severity"] | "warning";
+
+    logLine("[SchedKit] Alert id=" + String(alertId) + " sev=" + severity + " title=" + title);
+
+    // Pulse LED for this alert
+    runPrayerPulse();
+    pulsed++;
+    intercessionCount++;
     preferences.putLong("intercession_count", intercessionCount);
-    updateCrossIntercessionCount();
+
+    // Ack the alert so we don't fire again
+    String patchUrl = String(SCHEDKIT_BASE_URL) + "/v1/alerts/" + String(alertId);
+    HTTPClient patchHttp;
+    WiFiClientSecure patchClient;
+    patchClient.setInsecure();
+    patchHttp.begin(patchClient, patchUrl);
+    patchHttp.addHeader("x-api-key", SCHEDKIT_API_KEY);
+    patchHttp.addHeader("Content-Type", "application/json");
+    int patchCode = patchHttp.PATCH("{\"status\":\"acked\"}");
+    patchHttp.end();
+
+    if (patchCode >= 200 && patchCode < 300) {
+      logLine("[SchedKit] Alert " + String(alertId) + " acked");
+    } else {
+      logLine("[SchedKit] Ack failed code=" + String(patchCode));
+    }
+
+    if (pulsed < (int)alerts.size()) {
+      delay(2000); // gap between pulses
+    }
   }
 
-  if (newestTs.length() > 0 && newestTs != lastPrayerSeenTs) {
-    lastPrayerSeenTs = newestTs;
-    preferences.putString("last_prayer_ts", lastPrayerSeenTs);
-    logLine("[NocoDB] Updated last_prayer_ts=" + lastPrayerSeenTs);
-  }
-  if (newestId > lastPrayerSeenId) {
-    lastPrayerSeenId = newestId;
-    preferences.putLong("last_prayer_id", lastPrayerSeenId);
-    logLine("[NocoDB] Updated last_prayer_id=" + String(lastPrayerSeenId));
+  // Sync intercession count to NocoDB
+  if (pulsed > 0) {
+    updateCrossIntercessionCount();
   }
 }
 
